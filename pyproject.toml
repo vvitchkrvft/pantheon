@@ -30,5 +30,12 @@ markers = [
 ]
 addopts = "-m 'not integration' -n auto"
 
+[tool.ruff]
+extend-exclude = ["tmp/reference"]
+
+[tool.pyright]
+include = ["pantheon", "tests"]
+exclude = ["tmp/reference"]
+
 [tool.uv]
 package = true

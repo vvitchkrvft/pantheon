@@ -94,3 +94,99 @@ def test_group_list_prints_groups_in_stable_order(tmp_path: Path) -> None:
     assert beta_columns[3] == "2026-04-15T00:00:00Z"
     assert len(alpha_columns) == 4
     assert len(beta_columns) == 4
+
+
+def test_agent_add_creates_agent(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group_result = run_pantheon(db_path, "group", "init", "research")
+    assert group_result.returncode == 0
+
+    result = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "lead-1",
+        "--role",
+        "lead",
+        "--hermes-home",
+        "/tmp/hermes-home",
+        "--workdir",
+        "/tmp/workdir",
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.startswith("created agent ")
+    assert result.stdout.endswith(" lead-1\n")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT name, role, hermes_home, workdir, status
+            FROM agents
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert row == ("lead-1", "lead", "/tmp/hermes-home", "/tmp/workdir", "idle")
+
+
+def test_agent_add_rejects_second_lead_in_group(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group_result = run_pantheon(db_path, "group", "init", "research")
+    assert group_result.returncode == 0
+
+    first_lead = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "lead-1",
+        "--role",
+        "lead",
+        "--hermes-home",
+        "/tmp/hermes-home-1",
+        "--workdir",
+        "/tmp/workdir-1",
+    )
+    assert first_lead.returncode == 0
+
+    second_lead = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "lead-2",
+        "--role",
+        "lead",
+        "--hermes-home",
+        "/tmp/hermes-home-2",
+        "--workdir",
+        "/tmp/workdir-2",
+    )
+
+    assert second_lead.returncode == 1
+    assert second_lead.stdout == ""
+    assert second_lead.stderr == "group already has a lead agent\n"
+
+    connection = sqlite3.connect(db_path)
+    try:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM agents WHERE group_id = (SELECT id FROM groups WHERE name = ?)",
+            ("research",),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert count == (1,)

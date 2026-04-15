@@ -1,7 +1,9 @@
 import sqlite3
 from pathlib import Path
 
-from pantheon.db import bootstrap_database
+import pytest
+
+from pantheon.db import bootstrap_database, create_agent, create_group
 
 
 EXPECTED_TABLE_COLUMNS = {
@@ -178,3 +180,64 @@ def test_bootstrap_database_is_idempotent(tmp_path: Path) -> None:
         verification.close()
 
     assert row == ("group-1", "alpha")
+
+
+def test_create_agent_persists_agent_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+
+    agent = create_agent(
+        db_path,
+        group_name_or_id=group.name,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT id, group_id, name, role, profile_name, hermes_home, workdir, status
+            FROM agents
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert row == (
+        agent.id,
+        group.id,
+        "lead-1",
+        "lead",
+        None,
+        "/tmp/hermes-home",
+        "/tmp/workdir",
+        "idle",
+    )
+
+
+def test_create_agent_rejects_second_lead_in_group(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-1",
+        workdir="/tmp/workdir-1",
+    )
+
+    with pytest.raises(ValueError, match="group already has a lead agent"):
+        create_agent(
+            db_path,
+            group_name_or_id=group.id,
+            name="lead-2",
+            role="lead",
+            hermes_home="/tmp/hermes-home-2",
+            workdir="/tmp/workdir-2",
+        )

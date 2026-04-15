@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from pantheon.db import create_group, list_groups
+from pantheon.db import create_agent, create_group, list_groups
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +25,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     group_subparsers.add_parser("list")
 
+    agent_parser = subparsers.add_parser("agent")
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_command", required=True)
+
+    agent_add_parser = agent_subparsers.add_parser("add")
+    agent_add_parser.add_argument("--group", required=True)
+    agent_add_parser.add_argument("--name", required=True)
+    agent_add_parser.add_argument("--role", required=True, choices=("lead", "worker"))
+    agent_add_parser.add_argument("--hermes-home", required=True)
+    agent_add_parser.add_argument("--workdir", required=True)
+    agent_add_parser.add_argument("--profile-name")
+    agent_add_parser.add_argument("--model-override")
+    agent_add_parser.add_argument("--provider-override")
+
     return parser
 
 
@@ -34,6 +47,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "group":
         return _handle_group_command(args)
+    if args.command == "agent":
+        return _handle_agent_command(args)
 
     print(
         "Pantheon scaffold initialized. Read spec/PANTHEON_DOCTRINE.md and spec/PANTHEON_V1_BRIEF.md."
@@ -67,10 +82,40 @@ def _handle_group_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def _handle_agent_command(args: argparse.Namespace) -> int:
+    try:
+        if args.agent_command == "add":
+            agent = create_agent(
+                args.db,
+                group_name_or_id=args.group,
+                name=args.name,
+                role=args.role,
+                hermes_home=args.hermes_home,
+                workdir=args.workdir,
+                profile_name=args.profile_name,
+                model_override=args.model_override,
+                provider_override=args.provider_override,
+            )
+            print(f"created agent {agent.id} {agent.name}")
+            return 0
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except sqlite3.IntegrityError as exc:
+        print(_format_integrity_error(exc), file=sys.stderr)
+        return 1
+
+    parser = build_parser()
+    parser.print_usage(sys.stderr)
+    return 1
+
+
 def _format_integrity_error(error: sqlite3.IntegrityError) -> str:
     message = str(error)
     if "groups.name" in message:
         return "group name already exists"
+    if "agents.group_id, agents.name" in message:
+        return "agent name already exists in group"
     return "database write failed"
 
 

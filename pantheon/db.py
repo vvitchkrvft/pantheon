@@ -191,6 +191,22 @@ class GroupRecord:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class AgentRecord:
+    id: str
+    group_id: str
+    name: str
+    role: str
+    profile_name: str | None
+    hermes_home: str
+    workdir: str
+    model_override: str | None
+    provider_override: str | None
+    status: str
+    created_at: str
+    updated_at: str
+
+
 def connect_database(db_path: PathLike) -> sqlite3.Connection:
     bootstrap_database(db_path)
     connection = sqlite3.connect(Path(db_path))
@@ -250,6 +266,140 @@ def list_groups(db_path: PathLike) -> list[GroupRecord]:
         )
         for row in rows
     ]
+
+
+def create_agent(
+    db_path: PathLike,
+    *,
+    group_name_or_id: str,
+    name: str,
+    role: str,
+    hermes_home: str,
+    workdir: str,
+    profile_name: str | None = None,
+    model_override: str | None = None,
+    provider_override: str | None = None,
+) -> AgentRecord:
+    group_ref = group_name_or_id.strip()
+    agent_name = name.strip()
+    agent_role = role.strip()
+    agent_hermes_home = hermes_home.strip()
+    agent_workdir = workdir.strip()
+
+    if not group_ref:
+        raise ValueError("group is required")
+    if not agent_name:
+        raise ValueError("agent name must not be empty")
+    if agent_role not in {"lead", "worker"}:
+        raise ValueError("agent role must be lead or worker")
+    if not agent_hermes_home:
+        raise ValueError("hermes home must not be empty")
+    if not agent_workdir:
+        raise ValueError("workdir must not be empty")
+
+    connection = connect_database(db_path)
+    try:
+        group_id = _resolve_group_id(connection, group_ref)
+        if group_id is None:
+            raise ValueError("group not found")
+        if agent_role == "lead" and _group_has_lead(connection, group_id):
+            raise ValueError("group already has a lead agent")
+
+        timestamp = _utc_now()
+        agent_id = str(uuid4())
+        normalized_profile_name = _normalize_optional_text(profile_name)
+        normalized_model_override = _normalize_optional_text(model_override)
+        normalized_provider_override = _normalize_optional_text(provider_override)
+
+        connection.execute(
+            """
+            INSERT INTO agents (
+                id,
+                group_id,
+                name,
+                role,
+                profile_name,
+                hermes_home,
+                workdir,
+                model_override,
+                provider_override,
+                status,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent_id,
+                group_id,
+                agent_name,
+                agent_role,
+                normalized_profile_name,
+                agent_hermes_home,
+                agent_workdir,
+                normalized_model_override,
+                normalized_provider_override,
+                "idle",
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return AgentRecord(
+        id=agent_id,
+        group_id=group_id,
+        name=agent_name,
+        role=agent_role,
+        profile_name=normalized_profile_name,
+        hermes_home=agent_hermes_home,
+        workdir=agent_workdir,
+        model_override=normalized_model_override,
+        provider_override=normalized_provider_override,
+        status="idle",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def _resolve_group_id(connection: sqlite3.Connection, group_name_or_id: str) -> str | None:
+    row = connection.execute(
+        """
+        SELECT id
+        FROM groups
+        WHERE id = ? OR name = ?
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        """,
+        (group_name_or_id, group_name_or_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["id"])
+
+
+def _group_has_lead(connection: sqlite3.Connection, group_id: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM agents
+        WHERE group_id = ? AND role = 'lead'
+        LIMIT 1
+        """,
+        (group_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped
 
 
 def _utc_now() -> str:

@@ -727,3 +727,230 @@ def test_start_fails_when_goal_is_not_startable(tmp_path: Path) -> None:
     assert second_start.returncode == 1
     assert second_start.stdout == ""
     assert second_start.stderr == "goal is not startable from state running\n"
+
+
+def test_inspect_task_prints_task_detail_and_result_text(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    bootstrap_database(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO groups (id, name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("group-1", "research", "2026-04-15T00:00:00Z", "2026-04-15T00:00:00Z"),
+        )
+        connection.execute(
+            """
+            INSERT INTO agents (
+                id, group_id, name, role, profile_name, hermes_home, workdir,
+                model_override, provider_override, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "agent-1",
+                "group-1",
+                "lead-1",
+                "lead",
+                None,
+                "/tmp/hermes-home",
+                "/tmp/workdir",
+                None,
+                None,
+                "idle",
+                "2026-04-15T00:00:00Z",
+                "2026-04-15T00:00:00Z",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id, goal_id, parent_task_id, assigned_agent_id, title, input_text,
+                result_text, status, priority, depth, created_at, started_at,
+                completed_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-1",
+                "goal-1",
+                None,
+                "agent-1",
+                "Root task",
+                "Do the work",
+                "Final answer\nwith detail",
+                "complete",
+                5,
+                0,
+                "2026-04-15T00:00:00Z",
+                "2026-04-15T00:00:01Z",
+                "2026-04-15T00:00:02Z",
+                "2026-04-15T00:00:02Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = run_pantheon(db_path, "inspect", "task", "task-1")
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.splitlines() == [
+        "task\ttask-1\tgoal-1\t\tagent-1\tcomplete\t5\t0\t2026-04-15T00:00:00Z\t2026-04-15T00:00:01Z\t2026-04-15T00:00:02Z\t2026-04-15T00:00:02Z",
+        'title\t"Root task"',
+        'input_text\t"Do the work"',
+        'result_text\t"Final answer\\nwith detail"',
+    ]
+
+
+def test_inspect_run_prints_run_metadata_log_path_and_usage(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    bootstrap_database(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO groups (id, name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("group-1", "research", "2026-04-15T00:00:00Z", "2026-04-15T00:00:00Z"),
+        )
+        connection.execute(
+            """
+            INSERT INTO agents (
+                id, group_id, name, role, profile_name, hermes_home, workdir,
+                model_override, provider_override, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "agent-1",
+                "group-1",
+                "lead-1",
+                "lead",
+                None,
+                "/tmp/hermes-home",
+                "/tmp/workdir",
+                None,
+                None,
+                "idle",
+                "2026-04-15T00:00:00Z",
+                "2026-04-15T00:00:00Z",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id, goal_id, parent_task_id, assigned_agent_id, title, input_text,
+                result_text, status, priority, depth, created_at, started_at,
+                completed_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-1",
+                "goal-1",
+                None,
+                "agent-1",
+                "Root task",
+                "Do the work",
+                "done",
+                "complete",
+                5,
+                0,
+                "2026-04-15T00:00:00Z",
+                "2026-04-15T00:00:01Z",
+                "2026-04-15T00:00:02Z",
+                "2026-04-15T00:00:02Z",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO runs (
+                id, task_id, agent_id, attempt_number, status, session_id, pid,
+                exit_code, error_text, log_path, usage_json, started_at,
+                finished_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-1",
+                "task-1",
+                "agent-1",
+                1,
+                "complete",
+                "session-1",
+                None,
+                None,
+                None,
+                "/tmp/pantheon/logs/run-1.log",
+                '{"input_tokens":2}',
+                "2026-04-15T00:00:01Z",
+                "2026-04-15T00:00:02Z",
+                "2026-04-15T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = run_pantheon(db_path, "inspect", "run", "run-1")
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.splitlines() == [
+        "run\trun-1\ttask-1\tagent-1\t1\tcomplete\t/tmp/pantheon/logs/run-1.log\t2026-04-15T00:00:01Z\t2026-04-15T00:00:02Z\t2026-04-15T00:00:01Z",
+        "session_id\tsession-1",
+        "exit_code\t",
+        'error_text\t""',
+        'usage_json\t{"input_tokens":2}',
+    ]
+
+
+def test_inspect_task_fails_when_task_is_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    bootstrap_database(db_path)
+
+    result = run_pantheon(db_path, "inspect", "task", "missing-task")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "task not found\n"
+
+
+def test_inspect_run_fails_when_run_is_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    bootstrap_database(db_path)
+
+    result = run_pantheon(db_path, "inspect", "run", "missing-run")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "run not found\n"
+
+
+def test_inspect_task_does_not_initialize_missing_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    result = run_pantheon(db_path, "inspect", "task", "task-1")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "database not found\n"
+    assert not db_path.exists()
+
+
+def test_inspect_run_does_not_initialize_missing_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    result = run_pantheon(db_path, "inspect", "run", "run-1")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "database not found\n"
+    assert not db_path.exists()

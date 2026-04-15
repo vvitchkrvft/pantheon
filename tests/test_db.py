@@ -122,7 +122,7 @@ def _acp_adapter(
                 session_id=session_id,
                 stop_reason=stop_reason,
                 final_text=final_text,
-                stream_events=[StreamEvent(category="stdout", payload=final_text)],
+                stream_events=[StreamEvent(category="stdout", payload={"text": final_text})],
                 usage_json=None,
                 error_text=None if status == "complete" else "acp failure",
             )
@@ -696,8 +696,15 @@ def test_start_goal_execution_accepts_normalized_acp_result_contract(
                 stop_reason="end_turn",
                 final_text="acp success",
                 stream_events=[
-                    StreamEvent(category="stdout", payload="acp "),
-                    StreamEvent(category="stdout", payload="success"),
+                    StreamEvent(category="stdout", payload={"text": "acp "}),
+                    StreamEvent(category="stdout", payload={"text": "success"}),
+                    StreamEvent(
+                        category="structured_output",
+                        payload={
+                            "kind": "tool_call",
+                            "metadata": {"tool_name": "shell"},
+                        },
+                    ),
                 ],
                 usage_json='{"input_tokens":2,"output_tokens":2,"total_tokens":4}',
             )
@@ -713,7 +720,10 @@ def test_start_goal_execution_accepts_normalized_acp_result_contract(
     assert run.session_id == "acp-session-1"
     assert run.exit_code is None
     assert run.error_text is None
-    assert run.usage_json == '{"input_tokens":2,"output_tokens":2,"total_tokens":4}'
+    assert (
+        run.usage_json
+        == '{"input_tokens":2,"output_tokens":2,"total_tokens":4}'
+    )
 
     connection = sqlite3.connect(db_path)
     try:
@@ -733,6 +743,15 @@ def test_start_goal_execution_accepts_normalized_acp_result_contract(
             """,
             (run.id,),
         ).fetchone()
+        event_rows = connection.execute(
+            """
+            SELECT event_type, payload_json
+            FROM events
+            WHERE run_id = ?
+            ORDER BY created_at ASC, rowid ASC
+            """,
+            (run.id,),
+        ).fetchall()
     finally:
         connection.close()
 
@@ -743,6 +762,25 @@ def test_start_goal_execution_accepts_normalized_acp_result_contract(
         None,
         None,
         '{"input_tokens":2,"output_tokens":2,"total_tokens":4}',
+    )
+    assert [row[0] for row in event_rows] == [
+        "run.started",
+        "task.started",
+        "run.output",
+        "run.output",
+        "run.output",
+        "run.completed",
+        "task.completed",
+    ]
+    assert event_rows[2][1] == (
+        '{"data": {"text": "acp "}, "run_id": "'
+        + run.id
+        + '", "sequence": 1, "stream": "stdout"}'
+    )
+    assert event_rows[4][1] == (
+        '{"data": {"kind": "tool_call", "metadata": {"tool_name": "shell"}}, "run_id": "'
+        + run.id
+        + '", "sequence": 3, "stream": "structured_output"}'
     )
 
 

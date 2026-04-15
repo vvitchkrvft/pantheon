@@ -7,6 +7,7 @@ from pantheon.adapters import (
     ProcessResult,
     RunContext,
     StreamEvent,
+    _stream_event_from_acp_update,
 )
 from pantheon.db import AgentRecord, TaskRecord
 
@@ -133,8 +134,8 @@ def test_hermes_adapter_prefers_acp_and_normalizes_success() -> None:
             stop_reason="end_turn",
             final_text="done",
             stream_events=[
-                StreamEvent(category="stdout", payload="do"),
-                StreamEvent(category="stdout", payload="ne"),
+                StreamEvent(category="stdout", payload={"text": "do"}),
+                StreamEvent(category="stdout", payload={"text": "ne"}),
             ],
             usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',
         )
@@ -153,17 +154,20 @@ def test_hermes_adapter_prefers_acp_and_normalizes_success() -> None:
     assert acp_client.calls[0]["prompt_text"] == "Reply with exactly: done"
     assert process_runner.calls == []
     assert [(event.category, event.payload) for event in result.stream_events] == [
-        ("lifecycle", "started"),
-        ("stdout", "do"),
-        ("stdout", "ne"),
-        ("lifecycle", "exited"),
+        ("lifecycle", {"phase": "started"}),
+        ("stdout", {"text": "do"}),
+        ("stdout", {"text": "ne"}),
+        ("lifecycle", {"phase": "exited"}),
     ]
     assert result.final_result.status == "complete"
     assert result.final_result.final_text == "done"
     assert result.final_result.session_id == "acp-session-1"
     assert result.final_result.exit_code is None
     assert result.final_result.error_text is None
-    assert result.final_result.usage_json == '{"input_tokens":1,"output_tokens":1,"total_tokens":2}'
+    assert (
+        result.final_result.usage_json
+        == '{"input_tokens":1,"output_tokens":1,"total_tokens":2}'
+    )
 
 
 def test_hermes_adapter_normalizes_acp_prompt_failure_without_cli_rerun() -> None:
@@ -185,8 +189,8 @@ def test_hermes_adapter_normalizes_acp_prompt_failure_without_cli_rerun() -> Non
     assert len(acp_client.calls) == 1
     assert process_runner.calls == []
     assert [(event.category, event.payload) for event in result.stream_events] == [
-        ("lifecycle", "started"),
-        ("lifecycle", "exited"),
+        ("lifecycle", {"phase": "started"}),
+        ("lifecycle", {"phase": "exited"}),
     ]
     assert result.final_result.status == "failed"
     assert result.final_result.final_text == ""
@@ -287,3 +291,38 @@ def test_hermes_adapter_env_is_minimized(monkeypatch) -> None:
         "HERMES_HOME": "/tmp/hermes-home",
         "PATH": "/test/bin",
     }
+
+
+def test_stream_event_from_acp_update_captures_assistant_chunks() -> None:
+    event = _stream_event_from_acp_update(
+        {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"text": "partial answer"},
+        }
+    )
+
+    assert event == StreamEvent(
+        category="stdout",
+        payload={"text": "partial answer"},
+    )
+
+
+def test_stream_event_from_acp_update_preserves_non_text_runtime_updates() -> None:
+    event = _stream_event_from_acp_update(
+        {
+            "sessionUpdate": "tool_call",
+            "content": {"toolName": "shell"},
+            "callId": "call-1",
+        }
+    )
+
+    assert event == StreamEvent(
+        category="structured_output",
+        payload={
+            "kind": "tool_call",
+            "metadata": {
+                "call_id": "call-1",
+                "tool_name": "shell",
+            },
+        },
+    )

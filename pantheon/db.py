@@ -303,6 +303,42 @@ class ChildTaskCreateRecord:
     depth: int
 
 
+@dataclass(frozen=True)
+class TaskInspectionRecord:
+    id: str
+    goal_id: str
+    parent_task_id: str | None
+    assigned_agent_id: str
+    title: str
+    input_text: str
+    result_text: str | None
+    status: str
+    priority: int
+    depth: int
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class RunInspectionRecord:
+    id: str
+    task_id: str
+    agent_id: str
+    attempt_number: int
+    status: str
+    session_id: str | None
+    pid: int | None
+    exit_code: int | None
+    error_text: str | None
+    log_path: str
+    usage_json: str | None
+    started_at: str | None
+    finished_at: str | None
+    created_at: str
+
+
 def bootstrap_database(db_path: PathLike) -> None:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,6 +356,17 @@ def bootstrap_database(db_path: PathLike) -> None:
 def connect_database(db_path: PathLike) -> sqlite3.Connection:
     bootstrap_database(db_path)
     connection = sqlite3.connect(Path(db_path))
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def connect_readonly_database(db_path: PathLike) -> sqlite3.Connection:
+    path = Path(db_path)
+    if not path.exists():
+        raise ValueError("database not found")
+
+    connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -674,6 +721,86 @@ def get_events_for_goal(db_path: PathLike, goal_id: str) -> list[EventRecord]:
         connection.close()
 
     return [EventRecord(**dict(row)) for row in rows]
+
+
+def get_task_for_inspection(db_path: PathLike, task_id: str) -> TaskInspectionRecord:
+    normalized_task_id = task_id.strip()
+    if not normalized_task_id:
+        raise ValueError("task id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            FROM tasks
+            WHERE id = ?
+            """,
+            (normalized_task_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        raise ValueError("task not found")
+
+    return TaskInspectionRecord(**dict(row))
+
+
+def get_run_for_inspection(db_path: PathLike, run_id: str) -> RunInspectionRecord:
+    normalized_run_id = run_id.strip()
+    if not normalized_run_id:
+        raise ValueError("run id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                task_id,
+                agent_id,
+                attempt_number,
+                status,
+                session_id,
+                pid,
+                exit_code,
+                error_text,
+                log_path,
+                usage_json,
+                started_at,
+                finished_at,
+                created_at
+            FROM runs
+            WHERE id = ?
+            """,
+            (normalized_run_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        raise ValueError("run not found")
+
+    return RunInspectionRecord(**dict(row))
 
 
 def resolve_goal_for_start(

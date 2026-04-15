@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ from pantheon.db import (
     create_agent,
     create_group,
     get_goal_status,
+    get_run_for_inspection,
+    get_task_for_inspection,
     list_groups,
     submit_goal,
 )
@@ -58,6 +61,17 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("goal_id")
 
+    inspect_parser = subparsers.add_parser("inspect")
+    inspect_subparsers = inspect_parser.add_subparsers(
+        dest="inspect_command", required=True
+    )
+
+    inspect_task_parser = inspect_subparsers.add_parser("task")
+    inspect_task_parser.add_argument("task_id")
+
+    inspect_run_parser = inspect_subparsers.add_parser("run")
+    inspect_run_parser.add_argument("run_id")
+
     return parser
 
 
@@ -75,6 +89,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _handle_start_command(args)
     if args.command == "status":
         return _handle_status_command(args)
+    if args.command == "inspect":
+        return _handle_inspect_command(args)
 
     print(
         "Pantheon scaffold initialized. Read spec/PANTHEON_DOCTRINE.md and spec/PANTHEON_V1_BRIEF.md."
@@ -188,6 +204,57 @@ def _handle_start_command(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def _handle_inspect_command(args: argparse.Namespace) -> int:
+    try:
+        if args.inspect_command == "task":
+            task = get_task_for_inspection(args.db, args.task_id)
+            print(
+                "task\t"
+                f"{task.id}\t"
+                f"{task.goal_id}\t"
+                f"{task.parent_task_id or ''}\t"
+                f"{task.assigned_agent_id}\t"
+                f"{task.status}\t"
+                f"{task.priority}\t"
+                f"{task.depth}\t"
+                f"{task.created_at}\t"
+                f"{task.started_at or ''}\t"
+                f"{task.completed_at or ''}\t"
+                f"{task.updated_at}"
+            )
+            print(f"title\t{json.dumps(task.title)}")
+            print(f"input_text\t{json.dumps(task.input_text)}")
+            print(f"result_text\t{json.dumps(task.result_text or '')}")
+            return 0
+
+        if args.inspect_command == "run":
+            run = get_run_for_inspection(args.db, args.run_id)
+            print(
+                "run\t"
+                f"{run.id}\t"
+                f"{run.task_id}\t"
+                f"{run.agent_id}\t"
+                f"{run.attempt_number}\t"
+                f"{run.status}\t"
+                f"{run.log_path}\t"
+                f"{run.started_at or ''}\t"
+                f"{run.finished_at or ''}\t"
+                f"{run.created_at}"
+            )
+            print(f"session_id\t{run.session_id or ''}")
+            print(f"exit_code\t{'' if run.exit_code is None else run.exit_code}")
+            print(f"error_text\t{json.dumps(run.error_text or '')}")
+            print(f"usage_json\t{run.usage_json or ''}")
+            return 0
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    parser = build_parser()
+    parser.print_usage(sys.stderr)
+    return 1
 
 
 def _format_integrity_error(error: sqlite3.IntegrityError) -> str:

@@ -31,7 +31,7 @@ class RunContext:
 @dataclass(frozen=True)
 class StreamEvent:
     category: str
-    payload: str
+    payload: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -141,9 +141,9 @@ class HermesAdapter:
         terminal_status = _normalize_acp_status(acp_result.stop_reason)
         return AdapterRun(
             stream_events=[
-                StreamEvent(category="lifecycle", payload="started"),
+                StreamEvent(category="lifecycle", payload={"phase": "started"}),
                 *acp_result.stream_events,
-                StreamEvent(category="lifecycle", payload="exited"),
+                StreamEvent(category="lifecycle", payload={"phase": "exited"}),
             ],
             final_result=FinalResult(
                 status=terminal_status,
@@ -163,7 +163,7 @@ class HermesAdapter:
         command = _build_hermes_cli_command(agent, task)
         environment = _build_subprocess_env(agent)
 
-        stream_events = [StreamEvent(category="lifecycle", payload="started")]
+        stream_events = [StreamEvent(category="lifecycle", payload={"phase": "started"})]
         try:
             process_result = self._process_runner(
                 command,
@@ -171,7 +171,9 @@ class HermesAdapter:
                 env=environment,
             )
         except OSError as exc:
-            stream_events.append(StreamEvent(category="lifecycle", payload="failed"))
+            stream_events.append(
+                StreamEvent(category="lifecycle", payload={"phase": "failed"})
+            )
             return AdapterRun(
                 stream_events=stream_events,
                 final_result=FinalResult(
@@ -186,13 +188,21 @@ class HermesAdapter:
 
         if process_result.stdout:
             stream_events.append(
-                StreamEvent(category="stdout", payload=process_result.stdout)
+                StreamEvent(
+                    category="stdout",
+                    payload={"text": process_result.stdout},
+                )
             )
         if process_result.stderr:
             stream_events.append(
-                StreamEvent(category="stderr", payload=process_result.stderr)
+                StreamEvent(
+                    category="stderr",
+                    payload={"text": process_result.stderr},
+                )
             )
-        stream_events.append(StreamEvent(category="lifecycle", payload="exited"))
+        stream_events.append(
+            StreamEvent(category="lifecycle", payload={"phase": "exited"})
+        )
 
         final_text, session_id = _extract_session_id(process_result.stdout)
         if process_result.exit_code == 0:
@@ -374,7 +384,7 @@ class HermesAcpClient:
                 stream_events=stream_events,
             )
             stop_reason = str(prompt_response.get("stopReason") or "end_turn")
-            usage_json = _serialize_usage(prompt_response.get("usage"))
+            usage_json = _serialize_acp_usage(prompt_response.get("usage"))
             error_text = None
             if stop_reason == "refusal":
                 error_text = "Hermes ACP refused the prompt"
@@ -448,7 +458,7 @@ def _normalize_acp_status(stop_reason: str) -> str:
     return "complete"
 
 
-def _serialize_usage(usage: Any) -> str | None:
+def _serialize_acp_usage(usage: Any) -> str | None:
     if not isinstance(usage, dict):
         return None
     return json.dumps(usage, sort_keys=True)
@@ -490,16 +500,15 @@ def _handle_acp_server_message(
         update = params.get("update")
         if not isinstance(update, dict):
             return True
-        kind = str(update.get("sessionUpdate") or "")
-        content = update.get("content")
-        text = ""
-        if isinstance(content, dict):
-            text = str(content.get("text") or "")
-        if kind == "agent_message_chunk" and text:
+        event = _stream_event_from_acp_update(update)
+        if event is None:
+            return True
+        if event.category == "stdout":
+            text = str(event.payload.get("text") or "")
             if text_chunks is not None:
                 text_chunks.append(text)
-            if stream_events is not None:
-                stream_events.append(StreamEvent(category="stdout", payload=text))
+        if stream_events is not None:
+            stream_events.append(event)
         return True
 
     if process.stdin is None:
@@ -566,6 +575,56 @@ def _handle_acp_server_message(
     stdin.write(json.dumps(response) + "\n")
     stdin.flush()
     return True
+
+
+def _stream_event_from_acp_update(update: dict[str, Any]) -> StreamEvent | None:
+    session_update = str(update.get("sessionUpdate") or "").strip()
+    if not session_update:
+        return None
+
+    text = _extract_acp_update_text(update.get("content"))
+
+    if session_update == "agent_message_chunk" and text:
+        return StreamEvent(
+            category="stdout",
+            payload={"text": text},
+        )
+
+    metadata = _normalize_acp_update_metadata(update)
+    payload: dict[str, Any] = {"kind": session_update}
+    if text:
+        payload["text"] = text
+    if metadata:
+        payload["metadata"] = metadata
+
+    return StreamEvent(
+        category="structured_output",
+        payload=payload,
+    )
+
+
+def _extract_acp_update_text(content: Any) -> str:
+    if not isinstance(content, dict):
+        return ""
+    text_value = content.get("text")
+    if isinstance(text_value, str):
+        return text_value
+    return ""
+
+
+def _normalize_acp_update_metadata(update: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    call_id = update.get("callId")
+    if isinstance(call_id, str) and call_id:
+        metadata["call_id"] = call_id
+
+    content = update.get("content")
+    if isinstance(content, dict):
+        tool_name = content.get("toolName")
+        if isinstance(tool_name, str) and tool_name:
+            metadata["tool_name"] = tool_name
+
+    return metadata
 
 
 def _jsonrpc_error(message_id: Any, code: int, message: str) -> dict[str, Any]:

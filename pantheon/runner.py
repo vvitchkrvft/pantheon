@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from pantheon.adapters import HermesAdapter, RunContext
+from pantheon.adapters import HermesAdapter, RunContext, StreamEvent
 from pantheon.db import (
     AgentRecord,
     ChildTaskCreateRecord,
@@ -217,27 +217,35 @@ def _dispatch_task(
             usage_json=None,
         )
 
-    output_chunks = [
-        event.payload for event in adapter_run.stream_events if event.category in {"stdout", "stderr"}
+    output_events = [
+        event
+        for event in adapter_run.stream_events
+        if event.category in {"stdout", "stderr", "structured_output"}
     ]
-    raw_output = "".join(output_chunks)
+    raw_output = "".join(_text_for_log(event) for event in output_events)
     if raw_output:
         log_path.write_text(raw_output, encoding="utf-8")
     else:
         log_path.write_text("", encoding="utf-8")
 
-    output_created_at = _utc_now(connection)
-    if raw_output:
-        insert_event(
-            connection,
-            goal_id=goal_id,
-            task_id=task.id,
-            run_id=run_id,
-            agent_id=agent.id,
-            event_type="run.output",
-            payload={"run_id": run_id, "text": raw_output},
-            created_at=output_created_at,
-        )
+    if output_events:
+        output_created_at = _utc_now(connection)
+        for sequence, event in enumerate(output_events, start=1):
+            insert_event(
+                connection,
+                goal_id=goal_id,
+                task_id=task.id,
+                run_id=run_id,
+                agent_id=agent.id,
+                event_type="run.output",
+                payload={
+                    "data": event.payload,
+                    "run_id": run_id,
+                    "sequence": sequence,
+                    "stream": event.category,
+                },
+                created_at=output_created_at,
+            )
         connection.commit()
 
     return _apply_terminal_state(
@@ -426,6 +434,15 @@ def _is_task_dispatch_ready(connection, task: TaskRecord) -> bool:
     if row is None:
         raise ValueError(f"parent task not found: {task.parent_task_id}")
     return row["status"] == "complete"
+
+
+def _text_for_log(event: StreamEvent) -> str:
+    if event.category not in {"stdout", "stderr"}:
+        return ""
+    text = event.payload.get("text")
+    if isinstance(text, str):
+        return text
+    return ""
 
 
 def _reconcile_goal_state(connection, goal_id: str) -> None:

@@ -31,14 +31,27 @@ Core control-plane objects:
 - runs
 - events
 
+## Implemented So Far
+
+The current CLI scaffold supports:
+- `pantheon group init <name>`
+- `pantheon group list`
+- `pantheon agent add --group <group-name-or-id> --name <name> --role <lead|worker> --hermes-home <path> --workdir <path> [--profile-name ...] [--model-override ...] [--provider-override ...]`
+- `pantheon goal submit "<goal text>" --group <group-name-or-id>`
+
+The repo also includes:
+- SQLite bootstrap for the V1 core tables
+- agent registry scaffolding with one-lead-per-group enforcement
+- goal submission scaffolding that creates a queued goal and queued root task assigned to the group lead
+
 ## Not Built Yet
 
 Pantheon does not yet have:
 - a working TUI
-- SQLite control-plane implementation
 - Hermes adapter execution
-- runner/orchestrator behavior in code
+- runner/orchestrator execution behavior in code
 - goal/task/run inspection beyond the current scaffold
+- live run streaming, logs, and final result inspection
 
 ## Local Setup
 

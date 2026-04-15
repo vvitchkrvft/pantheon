@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from pantheon.db import create_agent, create_group, list_groups, submit_goal
+from pantheon.db import (
+    create_agent,
+    create_group,
+    get_goal_status,
+    list_groups,
+    submit_goal,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     goal_submit_parser.add_argument("goal_text")
     goal_submit_parser.add_argument("--group", required=True)
 
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("goal_id")
+
     return parser
 
 
@@ -58,6 +67,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _handle_agent_command(args)
     if args.command == "goal":
         return _handle_goal_command(args)
+    if args.command == "status":
+        return _handle_status_command(args)
 
     print(
         "Pantheon scaffold initialized. Read spec/PANTHEON_DOCTRINE.md and spec/PANTHEON_V1_BRIEF.md."
@@ -141,6 +152,22 @@ def _handle_goal_command(args: argparse.Namespace) -> int:
     parser = build_parser()
     parser.print_usage(sys.stderr)
     return 1
+
+
+def _handle_status_command(args: argparse.Namespace) -> int:
+    try:
+        goal = get_goal_status(args.db, args.goal_id)
+        print(
+            f"goal\t{goal.id}\t{goal.title}\t{goal.status}\t{goal.root_task_id or ''}"
+        )
+        for task in goal.tasks:
+            print(
+                f"task\t{task.id}\t{task.assigned_agent_id}\t{task.title}\t{task.status}\t{task.depth}"
+            )
+        return 0
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 def _format_integrity_error(error: sqlite3.IntegrityError) -> str:

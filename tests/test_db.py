@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from pantheon.db import bootstrap_database, create_agent, create_group, submit_goal
+from pantheon.db import (
+    bootstrap_database,
+    create_agent,
+    create_group,
+    get_goal_status,
+    submit_goal,
+)
 
 
 EXPECTED_TABLE_COLUMNS = {
@@ -339,3 +345,95 @@ def test_submit_goal_rejects_group_without_lead(tmp_path: Path) -> None:
             group_name_or_id=group.name,
             goal_text="Ship the first Pantheon slice",
         )
+
+
+def test_get_goal_status_returns_goal_summary_and_tasks(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-child-1",
+                submission.goal.id,
+                submission.root_task.id,
+                lead.id,
+                "Review outputs",
+                "Review outputs",
+                None,
+                "running",
+                5,
+                1,
+                "2026-04-15T00:00:01Z",
+                None,
+                None,
+                "2026-04-15T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    status = get_goal_status(db_path, submission.goal.id)
+
+    assert status.id == submission.goal.id
+    assert status.title == "Ship the first Pantheon slice"
+    assert status.status == "queued"
+    assert status.root_task_id == submission.root_task.id
+    assert status.tasks == [
+        type(status.tasks[0])(
+            id=submission.root_task.id,
+            assigned_agent_id=lead.id,
+            title="Ship the first Pantheon slice",
+            status="queued",
+            depth=0,
+        ),
+        type(status.tasks[0])(
+            id="task-child-1",
+            assigned_agent_id=lead.id,
+            title="Review outputs",
+            status="running",
+            depth=1,
+        ),
+    ]
+
+
+def test_get_goal_status_rejects_missing_goal(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    with pytest.raises(ValueError, match="goal not found"):
+        get_goal_status(db_path, "missing-goal")

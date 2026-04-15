@@ -2,7 +2,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from pantheon.db import bootstrap_database
+from pantheon.db import bootstrap_database, create_agent, create_group, submit_goal
 
 
 def run_pantheon(db_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -324,3 +324,279 @@ def test_goal_submit_fails_when_group_has_no_lead(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert result.stdout == ""
     assert result.stderr == "group has no lead agent\n"
+
+
+def test_status_prints_goal_summary_and_task_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-child-1",
+                submission.goal.id,
+                submission.root_task.id,
+                lead.id,
+                "Review outputs",
+                "Review outputs",
+                None,
+                "running",
+                5,
+                1,
+                "2026-04-15T00:00:01Z",
+                None,
+                None,
+                "2026-04-15T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = run_pantheon(db_path, "status", submission.goal.id)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.splitlines() == [
+        f"goal\t{submission.goal.id}\tShip the first Pantheon slice\tqueued\t{submission.root_task.id}",
+        f"task\t{submission.root_task.id}\t{lead.id}\tShip the first Pantheon slice\tqueued\t0",
+        f"task\ttask-child-1\t{lead.id}\tReview outputs\trunning\t1",
+    ]
+
+
+def test_status_fails_when_goal_is_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    result = run_pantheon(db_path, "status", "missing-goal")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "goal not found\n"
+
+
+def test_status_prints_tasks_in_stable_order(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    bootstrap_database(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO groups (id, name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("group-1", "research", "2026-04-15T00:00:00Z", "2026-04-15T00:00:00Z"),
+        )
+        connection.execute(
+            """
+            INSERT INTO agents (
+                id,
+                group_id,
+                name,
+                role,
+                profile_name,
+                hermes_home,
+                workdir,
+                model_override,
+                provider_override,
+                status,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "agent-1",
+                "group-1",
+                "lead-1",
+                "lead",
+                None,
+                "/tmp/hermes-home",
+                "/tmp/workdir",
+                None,
+                None,
+                "idle",
+                "2026-04-15T00:00:00Z",
+                "2026-04-15T00:00:00Z",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO goals (
+                id,
+                group_id,
+                title,
+                status,
+                root_task_id,
+                started_at,
+                completed_at,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "goal-1",
+                "group-1",
+                "Ship the first Pantheon slice",
+                "running",
+                "task-root",
+                None,
+                None,
+                "2026-04-15T00:00:00Z",
+                "2026-04-15T00:00:00Z",
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO tasks (
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "task-depth-1-late",
+                    "goal-1",
+                    "task-root",
+                    "agent-1",
+                    "Late child",
+                    "Late child",
+                    None,
+                    "queued",
+                    5,
+                    1,
+                    "2026-04-15T00:00:03Z",
+                    None,
+                    None,
+                    "2026-04-15T00:00:03Z",
+                ),
+                (
+                    "task-root",
+                    "goal-1",
+                    None,
+                    "agent-1",
+                    "Root task",
+                    "Root task",
+                    None,
+                    "complete",
+                    5,
+                    0,
+                    "2026-04-15T00:00:00Z",
+                    None,
+                    None,
+                    "2026-04-15T00:00:00Z",
+                ),
+                (
+                    "task-depth-1-early",
+                    "goal-1",
+                    "task-root",
+                    "agent-1",
+                    "Early child",
+                    "Early child",
+                    None,
+                    "running",
+                    5,
+                    1,
+                    "2026-04-15T00:00:01Z",
+                    None,
+                    None,
+                    "2026-04-15T00:00:01Z",
+                ),
+                (
+                    "task-depth-1-tie-a",
+                    "goal-1",
+                    "task-root",
+                    "agent-1",
+                    "Tie A",
+                    "Tie A",
+                    None,
+                    "queued",
+                    5,
+                    1,
+                    "2026-04-15T00:00:02Z",
+                    None,
+                    None,
+                    "2026-04-15T00:00:02Z",
+                ),
+                (
+                    "task-depth-1-tie-b",
+                    "goal-1",
+                    "task-root",
+                    "agent-1",
+                    "Tie B",
+                    "Tie B",
+                    None,
+                    "queued",
+                    5,
+                    1,
+                    "2026-04-15T00:00:02Z",
+                    None,
+                    None,
+                    "2026-04-15T00:00:02Z",
+                ),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = run_pantheon(db_path, "status", "goal-1")
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.splitlines() == [
+        "goal\tgoal-1\tShip the first Pantheon slice\trunning\ttask-root",
+        "task\ttask-root\tagent-1\tRoot task\tcomplete\t0",
+        "task\ttask-depth-1-early\tagent-1\tEarly child\trunning\t1",
+        "task\ttask-depth-1-tie-a\tagent-1\tTie A\tqueued\t1",
+        "task\ttask-depth-1-tie-b\tagent-1\tTie B\tqueued\t1",
+        "task\ttask-depth-1-late\tagent-1\tLate child\tqueued\t1",
+    ]

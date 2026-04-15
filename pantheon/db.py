@@ -244,6 +244,24 @@ class GoalSubmissionRecord:
     root_task: TaskRecord
 
 
+@dataclass(frozen=True)
+class GoalStatusTaskRecord:
+    id: str
+    assigned_agent_id: str
+    title: str
+    status: str
+    depth: int
+
+
+@dataclass(frozen=True)
+class GoalStatusRecord:
+    id: str
+    title: str
+    status: str
+    root_task_id: str | None
+    tasks: list[GoalStatusTaskRecord]
+
+
 def connect_database(db_path: PathLike) -> sqlite3.Connection:
     bootstrap_database(db_path)
     connection = sqlite3.connect(Path(db_path))
@@ -520,6 +538,54 @@ def submit_goal(
             completed_at=None,
             updated_at=timestamp,
         ),
+    )
+
+
+def get_goal_status(db_path: PathLike, goal_id: str) -> GoalStatusRecord:
+    normalized_goal_id = goal_id.strip()
+    if not normalized_goal_id:
+        raise ValueError("goal id is required")
+
+    connection = connect_database(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT id, title, status, root_task_id
+            FROM goals
+            WHERE id = ?
+            """,
+            (normalized_goal_id,),
+        ).fetchone()
+        if goal_row is None:
+            raise ValueError("goal not found")
+
+        task_rows = connection.execute(
+            """
+            SELECT id, assigned_agent_id, title, status, depth
+            FROM tasks
+            WHERE goal_id = ?
+            ORDER BY depth ASC, created_at ASC, id ASC
+            """,
+            (normalized_goal_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return GoalStatusRecord(
+        id=goal_row["id"],
+        title=goal_row["title"],
+        status=goal_row["status"],
+        root_task_id=goal_row["root_task_id"],
+        tasks=[
+            GoalStatusTaskRecord(
+                id=row["id"],
+                assigned_agent_id=row["assigned_agent_id"],
+                title=row["title"],
+                status=row["status"],
+                depth=row["depth"],
+            )
+            for row in task_rows
+        ],
     )
 
 

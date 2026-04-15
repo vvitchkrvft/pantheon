@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 PathLike = str | Path
 
@@ -178,3 +181,78 @@ def bootstrap_database(db_path: PathLike) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+@dataclass(frozen=True)
+class GroupRecord:
+    id: str
+    name: str
+    created_at: str
+    updated_at: str
+
+
+def connect_database(db_path: PathLike) -> sqlite3.Connection:
+    bootstrap_database(db_path)
+    connection = sqlite3.connect(Path(db_path))
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def create_group(db_path: PathLike, name: str) -> GroupRecord:
+    group_name = name.strip()
+    if not group_name:
+        raise ValueError("group name must not be empty")
+
+    timestamp = _utc_now()
+    group_id = str(uuid4())
+
+    connection = connect_database(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO groups (id, name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (group_id, group_name, timestamp, timestamp),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return GroupRecord(
+        id=group_id,
+        name=group_name,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def list_groups(db_path: PathLike) -> list[GroupRecord]:
+    connection = connect_database(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, name, created_at, updated_at
+            FROM groups
+            ORDER BY created_at ASC, id ASC
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [
+        GroupRecord(
+            id=row["id"],
+            name=row["name"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+        for row in rows
+    ]
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )

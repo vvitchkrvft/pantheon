@@ -1,6 +1,6 @@
 1. Product statement
 
-Pantheon V1 is a local, terminal-first control plane for running a saved group of Hermes agents against a user-submitted goal. It owns orchestration state, task dispatch, run supervision, live terminal visibility, and final inspection. Hermes remains the execution runtime. Pantheon is the system around the agents, not the agent itself.
+Pantheon V1 is a local, terminal-first control plane for running a saved group of Hermes agents against a user-submitted goal. It owns orchestration state, task dispatch, run supervision, live terminal visibility, and final inspection. Hermes remains the agent execution runtime. Pantheon is the system around the agents, not the agent itself.
 
 2. Hard constraints (must-follow rules)
 

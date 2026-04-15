@@ -1,0 +1,5 @@
+# Project-local Codex configuration for Pantheon.
+# Keep this file minimal until the repo needs more Codex-specific behavior.
+
+# Give Codex a larger budget for layered AGENTS.md/project instructions.
+project_doc_max_bytes = 65536

@@ -10,8 +10,8 @@ Pantheon is local-first. One machine. One operator. One SQLite database. Hermes 
 
 2. Core principles (non-negotiable invariants)
 
-- Pantheon is a control plane, not an execution engine.
-  Hermes remains the runtime. Pantheon never becomes a second agent framework.
+- Pantheon is a control plane, not an agent execution engine.
+  Hermes remains the agent execution runtime. Pantheon never becomes a second agent framework.
 
 - SQLite is the source of truth.
   Goals, tasks, runs, events, and outputs live in Pantheon’s database. Not in scattered runtime files.

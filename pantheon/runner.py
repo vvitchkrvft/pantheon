@@ -9,16 +9,27 @@ from uuid import uuid4
 from pantheon.adapters import HermesAdapter, RunContext
 from pantheon.db import (
     AgentRecord,
+    ChildTaskCreateRecord,
     GoalRecord,
     RunRecord,
     TaskRecord,
+    count_non_terminal_tasks_for_goal,
+    create_child_tasks,
     connect_database,
     count_active_runs_for_agent,
     get_agent_for_task,
     insert_event,
     list_queued_tasks_for_goal,
+    mark_goal_complete,
     next_run_attempt_number,
+    resolve_group_agent_for_goal,
     resolve_goal_for_start,
+)
+from pantheon.structured_output import (
+    CompletionJudgmentPayload,
+    ProposedTask,
+    TaskProposalPayload,
+    parse_control_payload,
 )
 
 
@@ -372,6 +383,15 @@ def _apply_terminal_state(
         created_at=finished_at,
     )
     connection.commit()
+    if terminal_status == "complete":
+        _apply_structured_output(
+            connection,
+            goal_id=goal_id,
+            task=task,
+            agent=agent,
+            run_id=run_id,
+            final_text=final_text,
+        )
 
     return RunRecord(
         id=run_id,
@@ -425,6 +445,219 @@ def _reconcile_goal_state(connection, goal_id: str) -> None:
         return
     # Without lead completion_judgment support in this slice, fully terminal work
     # does not further terminalize the goal. Per spec, the goal remains running.
+
+
+def _apply_structured_output(
+    connection,
+    *,
+    goal_id: str,
+    task: TaskRecord,
+    agent: AgentRecord,
+    run_id: str,
+    final_text: str,
+) -> None:
+    if agent.role != "lead":
+        return
+
+    parsed_result = parse_control_payload(final_text)
+    if parsed_result.rejection_reason is not None:
+        rejected_at = _utc_now(connection)
+        insert_event(
+            connection,
+            goal_id=goal_id,
+            task_id=task.id,
+            run_id=run_id,
+            agent_id=agent.id,
+            event_type="lead.payload_rejected",
+            payload={"reason": parsed_result.rejection_reason, "task_id": task.id},
+            created_at=rejected_at,
+        )
+        connection.commit()
+        return
+
+    if parsed_result.payload is None:
+        return
+
+    if parsed_result.payload.output_type == "task_proposal":
+        _apply_task_proposal(
+            connection,
+            goal_id=goal_id,
+            task=task,
+            run_id=run_id,
+            agent=agent,
+            proposal=parsed_result.payload.payload,
+        )
+        return
+
+    if parsed_result.payload.output_type == "completion_judgment":
+        _apply_completion_judgment(
+            connection,
+            goal_id=goal_id,
+            task=task,
+            run_id=run_id,
+            agent=agent,
+            judgment=parsed_result.payload.payload,
+        )
+        return
+
+    raise ValueError(f"unsupported structured output type: {parsed_result.payload.output_type}")
+
+
+def _apply_task_proposal(
+    connection,
+    *,
+    goal_id: str,
+    task: TaskRecord,
+    run_id: str,
+    agent: AgentRecord,
+    proposal: TaskProposalPayload | CompletionJudgmentPayload,
+) -> None:
+    if not isinstance(proposal, TaskProposalPayload):
+        raise ValueError("task_proposal handler received wrong payload type")
+
+    created_at = _utc_now(connection)
+    try:
+        child_specs = _build_child_task_specs(connection, goal_id=goal_id, task=task, proposal=proposal)
+    except ValueError as exc:
+        insert_event(
+            connection,
+            goal_id=goal_id,
+            task_id=task.id,
+            run_id=run_id,
+            agent_id=agent.id,
+            event_type="lead.payload_rejected",
+            payload={"reason": str(exc), "task_id": task.id},
+            created_at=created_at,
+        )
+        connection.commit()
+        return
+
+    created_tasks = create_child_tasks(connection, created_at=created_at, tasks=child_specs)
+    for created_task in created_tasks:
+        insert_event(
+            connection,
+            goal_id=goal_id,
+            task_id=created_task.id,
+            run_id=None,
+            agent_id=created_task.assigned_agent_id,
+            event_type="task.created",
+            payload={
+                "task_id": created_task.id,
+                "goal_id": created_task.goal_id,
+                "parent_task_id": created_task.parent_task_id,
+                "assigned_agent_id": created_task.assigned_agent_id,
+                "depth": created_task.depth,
+                "status": created_task.status,
+            },
+            created_at=created_at,
+        )
+    connection.commit()
+
+
+def _apply_completion_judgment(
+    connection,
+    *,
+    goal_id: str,
+    task: TaskRecord,
+    run_id: str,
+    agent: AgentRecord,
+    judgment: TaskProposalPayload | CompletionJudgmentPayload,
+) -> None:
+    if not isinstance(judgment, CompletionJudgmentPayload):
+        raise ValueError("completion_judgment handler received wrong payload type")
+    if judgment.judgment != "complete":
+        raise ValueError(f"unsupported completion_judgment value: {judgment.judgment}")
+
+    judged_at = _utc_now(connection)
+    if count_non_terminal_tasks_for_goal(connection, goal_id) > 0:
+        insert_event(
+            connection,
+            goal_id=goal_id,
+            task_id=task.id,
+            run_id=run_id,
+            agent_id=agent.id,
+            event_type="goal.completion_blocked",
+            payload={"goal_id": goal_id, "task_id": task.id, "judgment": judgment.judgment},
+            created_at=judged_at,
+        )
+        connection.commit()
+        return
+
+    mark_goal_complete(connection, goal_id, completed_at=judged_at)
+    insert_event(
+        connection,
+        goal_id=goal_id,
+        task_id=task.id,
+        run_id=run_id,
+        agent_id=agent.id,
+        event_type="goal.completed",
+        payload={"goal_id": goal_id, "task_id": task.id, "judgment": judgment.judgment},
+        created_at=judged_at,
+    )
+    connection.commit()
+
+
+def _build_child_task_specs(
+    connection,
+    *,
+    goal_id: str,
+    task: TaskRecord,
+    proposal: TaskProposalPayload,
+) -> list[ChildTaskCreateRecord]:
+    task_refs = {proposed_task.ref: proposed_task for proposed_task in proposal.tasks}
+    for proposed_task in proposal.tasks:
+        if proposed_task.parent_ref is not None and proposed_task.parent_ref not in task_refs:
+            raise ValueError(
+                f"task_proposal parent_ref must resolve within the same proposal: {proposed_task.parent_ref}"
+            )
+
+    depth_by_ref = {
+        proposed_task.ref: _resolve_child_depth(task_refs, proposed_task.ref, task.depth)
+        for proposed_task in proposal.tasks
+    }
+
+    ordered_specs: list[tuple[int, ChildTaskCreateRecord]] = []
+    task_id_by_ref = {proposed_task.ref: str(uuid4()) for proposed_task in proposal.tasks}
+    for index, proposed_task in enumerate(proposal.tasks):
+        assigned_agent = resolve_group_agent_for_goal(
+            connection, goal_id, proposed_task.assigned_agent
+        )
+        if assigned_agent is None:
+            raise ValueError(
+                f"task_proposal assigned_agent does not resolve in the goal group: {proposed_task.assigned_agent}"
+            )
+
+        parent_task_id = (
+            task.id
+            if proposed_task.parent_ref is None
+            else task_id_by_ref[proposed_task.parent_ref]
+        )
+        ordered_specs.append(
+            (
+                index,
+                ChildTaskCreateRecord(
+                id=task_id_by_ref[proposed_task.ref],
+                goal_id=goal_id,
+                parent_task_id=parent_task_id,
+                assigned_agent_id=assigned_agent.id,
+                title=proposed_task.title,
+                input_text=proposed_task.input_text,
+                priority=5,
+                depth=depth_by_ref[proposed_task.ref],
+                ),
+            )
+        )
+    ordered_specs.sort(key=lambda item: (item[1].depth, item[0]))
+    return [spec for _, spec in ordered_specs]
+
+
+def _resolve_child_depth(
+    task_refs: dict[str, ProposedTask], ref: str, lead_task_depth: int
+) -> int:
+    proposed_task = task_refs[ref]
+    if proposed_task.parent_ref is None:
+        return lead_task_depth + 1
+    return _resolve_child_depth(task_refs, proposed_task.parent_ref, lead_task_depth) + 1
 
 
 def _run_log_path(db_path: Path, run_id: str) -> Path:

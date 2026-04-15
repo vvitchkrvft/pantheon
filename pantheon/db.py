@@ -291,6 +291,18 @@ class GoalStatusRecord:
     runs: list[GoalStatusRunRecord]
 
 
+@dataclass(frozen=True)
+class ChildTaskCreateRecord:
+    id: str
+    goal_id: str
+    parent_task_id: str
+    assigned_agent_id: str
+    title: str
+    input_text: str
+    priority: int
+    depth: int
+
+
 def bootstrap_database(db_path: PathLike) -> None:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -782,6 +794,18 @@ def count_active_runs_for_agent(connection: sqlite3.Connection, agent_id: str) -
     return int(row[0])
 
 
+def count_non_terminal_tasks_for_goal(connection: sqlite3.Connection, goal_id: str) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE goal_id = ? AND status NOT IN ('complete', 'failed', 'cancelled')
+        """,
+        (goal_id,),
+    ).fetchone()
+    return int(row[0])
+
+
 def next_run_attempt_number(connection: sqlite3.Connection, task_id: str) -> int:
     row = connection.execute(
         """
@@ -792,6 +816,114 @@ def next_run_attempt_number(connection: sqlite3.Connection, task_id: str) -> int
         (task_id,),
     ).fetchone()
     return int(row[0])
+
+
+def resolve_group_agent_for_goal(
+    connection: sqlite3.Connection, goal_id: str, agent_name_or_id: str
+) -> AgentRecord | None:
+    row = connection.execute(
+        """
+        SELECT
+            agents.id,
+            agents.group_id,
+            agents.name,
+            agents.role,
+            agents.profile_name,
+            agents.hermes_home,
+            agents.workdir,
+            agents.model_override,
+            agents.provider_override,
+            agents.status,
+            agents.created_at,
+            agents.updated_at
+        FROM agents
+        JOIN goals ON goals.group_id = agents.group_id
+        WHERE goals.id = ? AND (agents.id = ? OR agents.name = ?)
+        ORDER BY CASE WHEN agents.id = ? THEN 0 ELSE 1 END, agents.created_at ASC, agents.id ASC
+        LIMIT 1
+        """,
+        (goal_id, agent_name_or_id, agent_name_or_id, agent_name_or_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return _agent_from_row(row)
+
+
+def create_child_tasks(
+    connection: sqlite3.Connection,
+    *,
+    created_at: str,
+    tasks: list[ChildTaskCreateRecord],
+) -> list[TaskRecord]:
+    created_records: list[TaskRecord] = []
+    for child_task in tasks:
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                child_task.id,
+                child_task.goal_id,
+                child_task.parent_task_id,
+                child_task.assigned_agent_id,
+                child_task.title,
+                child_task.input_text,
+                None,
+                "queued",
+                child_task.priority,
+                child_task.depth,
+                created_at,
+                None,
+                None,
+                created_at,
+            ),
+        )
+        created_records.append(
+            TaskRecord(
+                id=child_task.id,
+                goal_id=child_task.goal_id,
+                parent_task_id=child_task.parent_task_id,
+                assigned_agent_id=child_task.assigned_agent_id,
+                title=child_task.title,
+                input_text=child_task.input_text,
+                result_text=None,
+                status="queued",
+                priority=child_task.priority,
+                depth=child_task.depth,
+                created_at=created_at,
+                started_at=None,
+                completed_at=None,
+                updated_at=created_at,
+            )
+        )
+    return created_records
+
+
+def mark_goal_complete(connection: sqlite3.Connection, goal_id: str, *, completed_at: str) -> None:
+    connection.execute(
+        """
+        UPDATE goals
+        SET status = 'complete', completed_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (completed_at, completed_at, goal_id),
+    )
 
 
 def insert_event(

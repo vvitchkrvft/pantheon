@@ -109,6 +109,27 @@ def _successful_adapter(
     )
 
 
+def _acp_adapter(
+    *,
+    final_text: str,
+    status: str = "complete",
+    session_id: str = "acp-session-1",
+) -> HermesAdapter:
+    stop_reason = "end_turn" if status == "complete" else "refusal"
+    return HermesAdapter(
+        acp_client=RecordingAcpClient(
+            result=AcpPromptResult(
+                session_id=session_id,
+                stop_reason=stop_reason,
+                final_text=final_text,
+                stream_events=[StreamEvent(category="stdout", payload=final_text)],
+                usage_json=None,
+                error_text=None if status == "complete" else "acp failure",
+            )
+        )
+    )
+
+
 EXPECTED_TABLE_COLUMNS = {
     "groups": ["id", "name", "created_at", "updated_at"],
     "agents": [
@@ -1043,6 +1064,500 @@ def test_start_goal_execution_keeps_goal_running_when_all_tasks_terminal_without
         connection.close()
 
     assert goal_row == ("running", None)
+
+
+def test_start_goal_execution_creates_child_tasks_from_valid_lead_task_proposal_with_forward_parent_ref(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    worker = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="worker-1",
+        role="worker",
+        hermes_home="/tmp/hermes-home-worker",
+        workdir="/tmp/workdir-worker",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE agents
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("busy", "2026-04-15T00:00:00Z", worker.id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    final_text = """Lead summary
+{
+  "output_type": "task_proposal",
+  "tasks": [
+    {
+      "ref": "child",
+      "title": "Write synthesis",
+      "input_text": "Summarize the reviewed artifacts",
+      "assigned_agent": "worker-1",
+      "parent_ref": "parent"
+    },
+    {
+      "ref": "parent",
+      "title": "Research outputs",
+      "input_text": "Review the latest artifacts",
+      "assigned_agent": "worker-1",
+      "parent_ref": null
+    }
+  ]
+}"""
+
+    start_goal_execution(
+        db_path,
+        submission.goal.id,
+        adapter=_acp_adapter(final_text=final_text),
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        root_result = connection.execute(
+            """
+            SELECT result_text
+            FROM tasks
+            WHERE id = ?
+            """,
+            (submission.root_task.id,),
+        ).fetchone()
+        child_rows = connection.execute(
+            """
+            SELECT id, goal_id, parent_task_id, assigned_agent_id, depth, status, title
+            FROM tasks
+            WHERE goal_id = ? AND id != ?
+            ORDER BY depth ASC, created_at ASC, id ASC
+            """,
+            (submission.goal.id, submission.root_task.id),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert root_result == (final_text,)
+    assert len(child_rows) == 2
+    child_by_title = {row[6]: row for row in child_rows}
+    parent_row = child_by_title["Research outputs"]
+    child_row = child_by_title["Write synthesis"]
+
+    assert parent_row == (
+        parent_row[0],
+        submission.goal.id,
+        submission.root_task.id,
+        worker.id,
+        1,
+        "queued",
+        "Research outputs",
+    )
+    assert child_row == (
+        child_row[0],
+        submission.goal.id,
+        parent_row[0],
+        worker.id,
+        2,
+        "queued",
+        "Write synthesis",
+    )
+    events = get_events_for_goal(db_path, submission.goal.id)
+    assert [event.event_type for event in events] == [
+        "goal.started",
+        "run.started",
+        "task.started",
+        "run.output",
+        "run.completed",
+        "task.completed",
+        "task.created",
+        "task.created",
+    ]
+    assert "lead.payload_rejected" not in [event.event_type for event in events]
+
+
+def test_start_goal_execution_rejects_invalid_lead_task_proposal_without_creating_children(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    final_text = """Lead summary
+{
+  "output_type": "task_proposal",
+  "tasks": [
+    {
+      "ref": "t1",
+      "title": "Research outputs",
+      "input_text": "Review the latest artifacts",
+      "assigned_agent": "missing-worker",
+      "parent_ref": null
+    }
+  ]
+}"""
+
+    start_goal_execution(
+        db_path,
+        submission.goal.id,
+        adapter=_acp_adapter(final_text=final_text),
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        task_rows = connection.execute(
+            """
+            SELECT id, result_text
+            FROM tasks
+            WHERE goal_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (submission.goal.id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert task_rows == [(submission.root_task.id, final_text)]
+    events = get_events_for_goal(db_path, submission.goal.id)
+    assert [event.event_type for event in events] == [
+        "goal.started",
+        "run.started",
+        "task.started",
+        "run.output",
+        "run.completed",
+        "task.completed",
+        "lead.payload_rejected",
+    ]
+
+
+def test_worker_output_cannot_control_the_plane(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    worker = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="worker-1",
+        role="worker",
+        hermes_home="/tmp/hermes-home-worker",
+        workdir="/tmp/workdir-worker",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE agents
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("busy", "2026-04-15T00:00:00Z", lead.id),
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-worker-1",
+                submission.goal.id,
+                None,
+                worker.id,
+                "Worker follow-up",
+                "Worker follow-up",
+                None,
+                "queued",
+                5,
+                0,
+                "2026-04-15T00:00:01Z",
+                None,
+                None,
+                "2026-04-15T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    final_text = """Worker summary
+{
+  "output_type": "completion_judgment",
+  "judgment": "complete"
+}"""
+
+    start_goal_execution(
+        db_path,
+        submission.goal.id,
+        adapter=_acp_adapter(final_text=final_text),
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT status, completed_at
+            FROM goals
+            WHERE id = ?
+            """,
+            (submission.goal.id,),
+        ).fetchone()
+        task_rows = connection.execute(
+            """
+            SELECT id, result_text
+            FROM tasks
+            WHERE goal_id = ?
+            """,
+            (submission.goal.id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert goal_row == ("running", None)
+    assert dict(task_rows) == {
+        submission.root_task.id: None,
+        "task-worker-1": final_text,
+    }
+    assert [event.event_type for event in get_events_for_goal(db_path, submission.goal.id)] == [
+        "goal.started",
+        "run.started",
+        "task.started",
+        "run.output",
+        "run.completed",
+        "task.completed",
+    ]
+
+
+def test_start_goal_execution_marks_goal_complete_for_valid_lead_completion_judgment(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    final_text = """Lead summary
+{
+  "output_type": "completion_judgment",
+  "judgment": "complete"
+}"""
+
+    start_goal_execution(
+        db_path,
+        submission.goal.id,
+        adapter=_acp_adapter(final_text=final_text),
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT status, completed_at
+            FROM goals
+            WHERE id = ?
+            """,
+            (submission.goal.id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert goal_row[0] == "complete"
+    assert goal_row[1] is not None
+    assert [event.event_type for event in get_events_for_goal(db_path, submission.goal.id)] == [
+        "goal.started",
+        "run.started",
+        "task.started",
+        "run.output",
+        "run.completed",
+        "task.completed",
+        "goal.completed",
+    ]
+
+
+def test_start_goal_execution_blocks_premature_lead_completion_judgment(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    worker = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="worker-1",
+        role="worker",
+        hermes_home="/tmp/hermes-home-worker",
+        workdir="/tmp/workdir-worker",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-worker-1",
+                submission.goal.id,
+                submission.root_task.id,
+                worker.id,
+                "Worker follow-up",
+                "Worker follow-up",
+                None,
+                "queued",
+                5,
+                1,
+                "2099-04-15T00:00:01Z",
+                None,
+                None,
+                "2099-04-15T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    final_text = """Lead summary
+{
+  "output_type": "completion_judgment",
+  "judgment": "complete"
+}"""
+
+    start_goal_execution(
+        db_path,
+        submission.goal.id,
+        adapter=_acp_adapter(final_text=final_text),
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT status, completed_at
+            FROM goals
+            WHERE id = ?
+            """,
+            (submission.goal.id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert goal_row == ("running", None)
+    assert [event.event_type for event in get_events_for_goal(db_path, submission.goal.id)] == [
+        "goal.started",
+        "run.started",
+        "task.started",
+        "run.output",
+        "run.completed",
+        "task.completed",
+        "goal.completion_blocked",
+        "run.started",
+        "task.started",
+        "run.output",
+        "run.completed",
+        "task.completed",
+    ]
 
 
 def test_start_goal_execution_only_dispatches_tasks_with_complete_parent(

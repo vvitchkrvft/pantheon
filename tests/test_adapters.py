@@ -1,6 +1,13 @@
 from dataclasses import dataclass
 
-from pantheon.adapters import HermesAdapter, ProcessResult, RunContext
+from pantheon.adapters import (
+    AcpPromptResult,
+    AcpUnavailableError,
+    HermesAdapter,
+    ProcessResult,
+    RunContext,
+    StreamEvent,
+)
 from pantheon.db import AgentRecord, TaskRecord
 
 
@@ -41,6 +48,39 @@ class RecordingProcessRunner:
             stderr=self.stderr,
             exit_code=self.exit_code,
         )
+
+
+class RecordingAcpClient:
+    def __init__(
+        self,
+        *,
+        result: AcpPromptResult | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def run_prompt(
+        self,
+        *,
+        command: list[str],
+        cwd: str,
+        env: dict[str, str],
+        prompt_text: str,
+    ) -> AcpPromptResult:
+        self.calls.append(
+            {
+                "command": command,
+                "cwd": cwd,
+                "env": env,
+                "prompt_text": prompt_text,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        assert self.result is not None
+        return self.result
 
 
 def _agent(**overrides: str | None) -> AgentRecord:
@@ -86,16 +126,88 @@ def _run_context() -> RunContext:
     return RunContext(run_id="run-1", log_path="/tmp/run-1.log")
 
 
-def test_hermes_adapter_normalizes_successful_quiet_mode_output() -> None:
-    process_runner = RecordingProcessRunner(
-        stdout="done\n\nsession_id: sess-123\n",
-        stderr="",
-        exit_code=0,
+def test_hermes_adapter_prefers_acp_and_normalizes_success() -> None:
+    acp_client = RecordingAcpClient(
+        result=AcpPromptResult(
+            session_id="acp-session-1",
+            stop_reason="end_turn",
+            final_text="done",
+            stream_events=[
+                StreamEvent(category="stdout", payload="do"),
+                StreamEvent(category="stdout", payload="ne"),
+            ],
+            usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',
+        )
     )
-    adapter = HermesAdapter(process_runner=process_runner)
+    process_runner = RecordingProcessRunner(stdout="should not run")
+    adapter = HermesAdapter(process_runner=process_runner, acp_client=acp_client)
 
     result = adapter.run_task(_agent(), _task(), _run_context())
 
+    assert len(acp_client.calls) == 1
+    assert acp_client.calls[0]["command"] == ["hermes", "acp"]
+    assert acp_client.calls[0]["cwd"] == "/tmp/workdir"
+    env = acp_client.calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["HERMES_HOME"] == "/tmp/hermes-home"
+    assert acp_client.calls[0]["prompt_text"] == "Reply with exactly: done"
+    assert process_runner.calls == []
+    assert [(event.category, event.payload) for event in result.stream_events] == [
+        ("lifecycle", "started"),
+        ("stdout", "do"),
+        ("stdout", "ne"),
+        ("lifecycle", "exited"),
+    ]
+    assert result.final_result.status == "complete"
+    assert result.final_result.final_text == "done"
+    assert result.final_result.session_id == "acp-session-1"
+    assert result.final_result.exit_code is None
+    assert result.final_result.error_text is None
+    assert result.final_result.usage_json == '{"input_tokens":1,"output_tokens":1,"total_tokens":2}'
+
+
+def test_hermes_adapter_normalizes_acp_prompt_failure_without_cli_rerun() -> None:
+    acp_client = RecordingAcpClient(
+        result=AcpPromptResult(
+            session_id="acp-session-2",
+            stop_reason="refusal",
+            final_text="",
+            stream_events=[],
+            usage_json=None,
+            error_text="Hermes ACP refused the prompt",
+        )
+    )
+    process_runner = RecordingProcessRunner(stdout="should not run")
+    adapter = HermesAdapter(process_runner=process_runner, acp_client=acp_client)
+
+    result = adapter.run_task(_agent(), _task(), _run_context())
+
+    assert len(acp_client.calls) == 1
+    assert process_runner.calls == []
+    assert [(event.category, event.payload) for event in result.stream_events] == [
+        ("lifecycle", "started"),
+        ("lifecycle", "exited"),
+    ]
+    assert result.final_result.status == "failed"
+    assert result.final_result.final_text == ""
+    assert result.final_result.session_id == "acp-session-2"
+    assert result.final_result.exit_code is None
+    assert result.final_result.error_text == "Hermes ACP refused the prompt"
+    assert result.final_result.usage_json is None
+
+
+def test_hermes_adapter_falls_back_to_cli_when_acp_is_unavailable() -> None:
+    acp_client = RecordingAcpClient(error=AcpUnavailableError("acp unavailable"))
+    process_runner = RecordingProcessRunner(
+        stdout="done\n\nsession_id: cli-session-1\n",
+        stderr="",
+        exit_code=0,
+    )
+    adapter = HermesAdapter(process_runner=process_runner, acp_client=acp_client)
+
+    result = adapter.run_task(_agent(), _task(), _run_context())
+
+    assert len(acp_client.calls) == 1
     assert len(process_runner.calls) == 1
     assert process_runner.calls[0].command == [
         "hermes",
@@ -106,113 +218,24 @@ def test_hermes_adapter_normalizes_successful_quiet_mode_output() -> None:
         "--source",
         "tool",
     ]
-    assert process_runner.calls[0].cwd == "/tmp/workdir"
-    assert process_runner.calls[0].env["HERMES_HOME"] == "/tmp/hermes-home"
-    assert result.stream_events == [
-        type(result.stream_events[0])(category="lifecycle", payload="started"),
-        type(result.stream_events[0])(
-            category="stdout", payload="done\n\nsession_id: sess-123\n"
-        ),
-        type(result.stream_events[0])(category="lifecycle", payload="exited"),
-    ]
     assert result.final_result.status == "complete"
     assert result.final_result.final_text == "done"
-    assert result.final_result.session_id == "sess-123"
+    assert result.final_result.session_id == "cli-session-1"
     assert result.final_result.exit_code == 0
     assert result.final_result.error_text is None
     assert result.final_result.usage_json is None
 
 
-def test_hermes_adapter_env_is_minimized(monkeypatch) -> None:
-    monkeypatch.setenv("PATH", "/test/bin")
-    monkeypatch.setenv("UNRELATED_SECRET", "do-not-forward")
-    process_runner = RecordingProcessRunner(stdout="done\n\nsession_id: sess-123\n")
-    adapter = HermesAdapter(process_runner=process_runner)
-
-    adapter.run_task(_agent(), _task(), _run_context())
-
-    assert process_runner.calls[0].env == {
-        "HERMES_HOME": "/tmp/hermes-home",
-        "PATH": "/test/bin",
-    }
-
-
-def test_hermes_adapter_normalizes_failed_process_output() -> None:
+def test_hermes_adapter_selection_uses_cli_after_acp_session_rejection_only() -> None:
+    acp_client = RecordingAcpClient(error=AcpUnavailableError("initialize failed"))
     process_runner = RecordingProcessRunner(
         stdout="partial output\n",
         stderr="provider missing\n",
         exit_code=7,
     )
-    adapter = HermesAdapter(process_runner=process_runner)
+    adapter = HermesAdapter(process_runner=process_runner, acp_client=acp_client)
 
-    result = adapter.run_task(_agent(), _task(), _run_context())
-
-    assert result.stream_events == [
-        type(result.stream_events[0])(category="lifecycle", payload="started"),
-        type(result.stream_events[0])(category="stdout", payload="partial output\n"),
-        type(result.stream_events[0])(category="stderr", payload="provider missing\n"),
-        type(result.stream_events[0])(category="lifecycle", payload="exited"),
-    ]
-    assert result.final_result.status == "failed"
-    assert result.final_result.final_text == "partial output"
-    assert result.final_result.session_id is None
-    assert result.final_result.exit_code == 7
-    assert result.final_result.error_text == "provider missing"
-    assert result.final_result.usage_json is None
-
-
-def test_hermes_adapter_preserves_session_id_prefixed_body_lines() -> None:
-    process_runner = RecordingProcessRunner(
-        stdout="intro\nsession_id: keep this line\nclosing\n",
-        exit_code=0,
-    )
-    adapter = HermesAdapter(process_runner=process_runner)
-
-    result = adapter.run_task(_agent(), _task(), _run_context())
-
-    assert result.final_result.final_text == "intro\nsession_id: keep this line\nclosing"
-    assert result.final_result.session_id is None
-
-
-def test_hermes_adapter_extracts_only_final_trailer_session_metadata() -> None:
-    process_runner = RecordingProcessRunner(
-        stdout="intro\nsession_id: keep this line\nclosing\nsession_id: sess-123\n",
-        exit_code=0,
-    )
-    adapter = HermesAdapter(process_runner=process_runner)
-
-    result = adapter.run_task(_agent(), _task(), _run_context())
-
-    assert (
-        result.final_result.final_text
-        == "intro\nsession_id: keep this line\nclosing"
-    )
-    assert result.final_result.session_id == "sess-123"
-
-
-def test_hermes_adapter_reports_launch_failure_without_session_data() -> None:
-    process_runner = RecordingProcessRunner(error=OSError("No such file or directory"))
-    adapter = HermesAdapter(process_runner=process_runner)
-
-    result = adapter.run_task(_agent(), _task(), _run_context())
-
-    assert result.stream_events == [
-        type(result.stream_events[0])(category="lifecycle", payload="started"),
-        type(result.stream_events[0])(category="lifecycle", payload="failed"),
-    ]
-    assert result.final_result.status == "failed"
-    assert result.final_result.final_text == ""
-    assert result.final_result.session_id is None
-    assert result.final_result.exit_code is None
-    assert result.final_result.error_text == "No such file or directory"
-    assert result.final_result.usage_json is None
-
-
-def test_hermes_adapter_applies_model_and_provider_overrides_to_command() -> None:
-    process_runner = RecordingProcessRunner(stdout="done\nsession_id: sess-123\n")
-    adapter = HermesAdapter(process_runner=process_runner)
-
-    adapter.run_task(
+    result = adapter.run_task(
         _agent(
             model_override="openai/gpt-5.4-mini",
             provider_override="openai-codex",
@@ -221,6 +244,8 @@ def test_hermes_adapter_applies_model_and_provider_overrides_to_command() -> Non
         _run_context(),
     )
 
+    assert len(acp_client.calls) == 1
+    assert len(process_runner.calls) == 1
     assert process_runner.calls[0].command == [
         "hermes",
         "chat",
@@ -234,16 +259,31 @@ def test_hermes_adapter_applies_model_and_provider_overrides_to_command() -> Non
         "--provider",
         "openai-codex",
     ]
+    assert result.final_result.status == "failed"
+    assert result.final_result.final_text == "partial output"
+    assert result.final_result.session_id is None
+    assert result.final_result.exit_code == 7
+    assert result.final_result.error_text == "provider missing"
+    assert result.final_result.usage_json is None
 
 
-def test_hermes_adapter_extracts_final_session_id_without_blank_separator() -> None:
-    process_runner = RecordingProcessRunner(
-        stdout="done\nsession_id: sess-123\n",
-        exit_code=0,
+def test_hermes_adapter_env_is_minimized(monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "/test/bin")
+    monkeypatch.setenv("UNRELATED_SECRET", "do-not-forward")
+    acp_client = RecordingAcpClient(
+        result=AcpPromptResult(
+            session_id="acp-session-3",
+            stop_reason="end_turn",
+            final_text="done",
+            stream_events=[],
+            usage_json=None,
+        )
     )
-    adapter = HermesAdapter(process_runner=process_runner)
+    adapter = HermesAdapter(acp_client=acp_client)
 
-    result = adapter.run_task(_agent(), _task(), _run_context())
+    adapter.run_task(_agent(), _task(), _run_context())
 
-    assert result.final_result.final_text == "done"
-    assert result.final_result.session_id == "sess-123"
+    assert acp_client.calls[0]["env"] == {
+        "HERMES_HOME": "/tmp/hermes-home",
+        "PATH": "/test/bin",
+    }

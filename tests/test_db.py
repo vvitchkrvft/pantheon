@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from pantheon.adapters import HermesAdapter, ProcessResult
+from pantheon.adapters import (
+    AcpPromptResult,
+    AcpUnavailableError,
+    HermesAdapter,
+    ProcessResult,
+    StreamEvent,
+)
 from pantheon.db import (
     bootstrap_database,
     create_agent,
@@ -52,6 +58,39 @@ class RecordingProcessRunner:
         )
 
 
+class RecordingAcpClient:
+    def __init__(
+        self,
+        *,
+        result: AcpPromptResult | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def run_prompt(
+        self,
+        *,
+        command: list[str],
+        cwd: str,
+        env: dict[str, str],
+        prompt_text: str,
+    ) -> AcpPromptResult:
+        self.calls.append(
+            {
+                "command": command,
+                "cwd": cwd,
+                "env": env,
+                "prompt_text": prompt_text,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        assert self.result is not None
+        return self.result
+
+
 def _successful_adapter(
     *,
     stdout: str = "adapter success\n\nsession_id: sess-1\n",
@@ -64,7 +103,10 @@ def _successful_adapter(
         stderr=stderr,
         exit_code=exit_code,
     )
-    return HermesAdapter(process_runner=process_runner)
+    return HermesAdapter(
+        process_runner=process_runner,
+        acp_client=RecordingAcpClient(error=AcpUnavailableError("acp unavailable")),
+    )
 
 
 EXPECTED_TABLE_COLUMNS = {
@@ -519,7 +561,10 @@ def test_start_goal_execution_persists_first_run_and_terminal_transitions(
     start_result = start_goal_execution(
         db_path,
         submission.goal.id,
-        adapter=HermesAdapter(process_runner=process_runner),
+        adapter=HermesAdapter(
+            process_runner=process_runner,
+            acp_client=RecordingAcpClient(error=AcpUnavailableError("acp unavailable")),
+        ),
     )
 
     assert start_result.goal_id == submission.goal.id
@@ -601,6 +646,83 @@ def test_start_goal_execution_persists_first_run_and_terminal_transitions(
         "run.completed",
         "task.completed",
     ]
+
+
+def test_start_goal_execution_accepts_normalized_acp_result_contract(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    adapter = HermesAdapter(
+        acp_client=RecordingAcpClient(
+            result=AcpPromptResult(
+                session_id="acp-session-1",
+                stop_reason="end_turn",
+                final_text="acp success",
+                stream_events=[
+                    StreamEvent(category="stdout", payload="acp "),
+                    StreamEvent(category="stdout", payload="success"),
+                ],
+                usage_json='{"input_tokens":2,"output_tokens":2,"total_tokens":4}',
+            )
+        )
+    )
+
+    start_result = start_goal_execution(db_path, submission.goal.id, adapter=adapter)
+
+    assert len(start_result.runs) == 1
+    run = start_result.runs[0]
+    assert run.agent_id == lead.id
+    assert run.status == "complete"
+    assert run.session_id == "acp-session-1"
+    assert run.exit_code is None
+    assert run.error_text is None
+    assert run.usage_json == '{"input_tokens":2,"output_tokens":2,"total_tokens":4}'
+
+    connection = sqlite3.connect(db_path)
+    try:
+        task_row = connection.execute(
+            """
+            SELECT status, result_text
+            FROM tasks
+            WHERE id = ?
+            """,
+            (submission.root_task.id,),
+        ).fetchone()
+        run_row = connection.execute(
+            """
+            SELECT status, session_id, exit_code, error_text, usage_json
+            FROM runs
+            WHERE id = ?
+            """,
+            (run.id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert task_row == ("complete", "acp success")
+    assert run_row == (
+        "complete",
+        "acp-session-1",
+        None,
+        None,
+        '{"input_tokens":2,"output_tokens":2,"total_tokens":4}',
+    )
 
 
 def test_start_goal_execution_increments_attempt_number_for_retried_task(
@@ -818,7 +940,10 @@ def test_start_goal_execution_persists_terminal_failure_when_hermes_launch_fails
     start_result = start_goal_execution(
         db_path,
         submission.goal.id,
-        adapter=HermesAdapter(process_runner=process_runner),
+        adapter=HermesAdapter(
+            process_runner=process_runner,
+            acp_client=RecordingAcpClient(error=AcpUnavailableError("acp unavailable")),
+        ),
     )
 
     assert len(start_result.runs) == 1

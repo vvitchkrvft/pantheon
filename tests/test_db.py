@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from pantheon.adapters import HermesAdapter
+from pantheon.adapters import HermesAdapter, ProcessResult
 from pantheon.db import (
     bootstrap_database,
     create_agent,
@@ -18,6 +18,53 @@ from pantheon.runner import start_goal_execution
 class RaisingAdapter(HermesAdapter):
     def run_task(self, agent, task, run_context):  # type: ignore[override]
         raise RuntimeError("adapter exploded")
+
+
+class RecordingProcessRunner:
+    def __init__(
+        self,
+        *,
+        stdout: str = "adapter success\n\nsession_id: sess-1\n",
+        stderr: str = "",
+        exit_code: int = 0,
+        error: OSError | None = None,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_code = exit_code
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(
+        self,
+        command: list[str],
+        *,
+        cwd: str,
+        env: dict[str, str],
+    ) -> ProcessResult:
+        self.calls.append({"command": command, "cwd": cwd, "env": env})
+        if self.error is not None:
+            raise self.error
+        return ProcessResult(
+            stdout=self.stdout,
+            stderr=self.stderr,
+            exit_code=self.exit_code,
+        )
+
+
+def _successful_adapter(
+    *,
+    stdout: str = "adapter success\n\nsession_id: sess-1\n",
+    stderr: str = "",
+    exit_code: int = 0,
+    runner: RecordingProcessRunner | None = None,
+) -> HermesAdapter:
+    process_runner = runner or RecordingProcessRunner(
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code,
+    )
+    return HermesAdapter(process_runner=process_runner)
 
 
 EXPECTED_TABLE_COLUMNS = {
@@ -468,7 +515,12 @@ def test_start_goal_execution_persists_first_run_and_terminal_transitions(
         goal_text="Ship the first Pantheon slice",
     )
 
-    start_result = start_goal_execution(db_path, submission.goal.id)
+    process_runner = RecordingProcessRunner()
+    start_result = start_goal_execution(
+        db_path,
+        submission.goal.id,
+        adapter=HermesAdapter(process_runner=process_runner),
+    )
 
     assert start_result.goal_id == submission.goal.id
     assert len(start_result.runs) == 1
@@ -525,7 +577,7 @@ def test_start_goal_execution_persists_first_run_and_terminal_transitions(
     assert goal_row == ("running", start_result.started_at, None)
     assert task_row == (
         "complete",
-        "stub Hermes execution completed",
+        "adapter success",
         run.started_at,
         run.finished_at,
     )
@@ -533,7 +585,7 @@ def test_start_goal_execution_persists_first_run_and_terminal_transitions(
     assert run_row == (
         "complete",
         1,
-        f"stub-session-{run.id}",
+        "sess-1",
         0,
         None,
         run.started_at,
@@ -643,7 +695,9 @@ def test_start_goal_execution_increments_attempt_number_for_retried_task(
     finally:
         connection.close()
 
-    start_result = start_goal_execution(db_path, submission.goal.id)
+    start_result = start_goal_execution(
+        db_path, submission.goal.id, adapter=_successful_adapter()
+    )
 
     assert [run.attempt_number for run in start_result.runs] == [2]
 
@@ -676,10 +730,12 @@ def test_start_goal_execution_requires_queued_goal_state(tmp_path: Path) -> None
         goal_text="Ship the first Pantheon slice",
     )
 
-    start_goal_execution(db_path, submission.goal.id)
+    start_goal_execution(db_path, submission.goal.id, adapter=_successful_adapter())
 
     with pytest.raises(ValueError, match="goal is not startable from state running"):
-        start_goal_execution(db_path, submission.goal.id)
+        start_goal_execution(
+            db_path, submission.goal.id, adapter=_successful_adapter()
+        )
 
 
 def test_start_goal_execution_with_busy_agent_does_not_false_start(tmp_path: Path) -> None:
@@ -736,7 +792,7 @@ def test_start_goal_execution_with_busy_agent_does_not_false_start(tmp_path: Pat
     assert get_events_for_goal(db_path, submission.goal.id) == []
 
 
-def test_start_goal_execution_converts_adapter_exception_to_terminal_failure(
+def test_start_goal_execution_persists_terminal_failure_when_hermes_launch_fails(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "pantheon.db"
@@ -756,14 +812,19 @@ def test_start_goal_execution_converts_adapter_exception_to_terminal_failure(
         goal_text="Ship the first Pantheon slice",
     )
 
+    process_runner = RecordingProcessRunner(
+        error=OSError("No such file or directory: 'hermes'")
+    )
     start_result = start_goal_execution(
-        db_path, submission.goal.id, adapter=RaisingAdapter()
+        db_path,
+        submission.goal.id,
+        adapter=HermesAdapter(process_runner=process_runner),
     )
 
     assert len(start_result.runs) == 1
     run = start_result.runs[0]
     assert run.status == "failed"
-    assert run.error_text == "adapter exploded"
+    assert run.error_text == "No such file or directory: 'hermes'"
     assert run.finished_at is not None
 
     connection = sqlite3.connect(db_path)
@@ -806,7 +867,11 @@ def test_start_goal_execution_converts_adapter_exception_to_terminal_failure(
     assert goal_row == ("running", start_result.started_at, None)
     assert task_row == ("failed", "", run.finished_at)
     assert agent_row == ("idle",)
-    assert run_row == ("failed", "adapter exploded", run.finished_at)
+    assert run_row == (
+        "failed",
+        "No such file or directory: 'hermes'",
+        run.finished_at,
+    )
 
     assert [event.event_type for event in get_events_for_goal(db_path, submission.goal.id)] == [
         "goal.started",
@@ -918,7 +983,9 @@ def test_start_goal_execution_only_dispatches_tasks_with_complete_parent(
     finally:
         connection.close()
 
-    start_result = start_goal_execution(db_path, submission.goal.id)
+    start_result = start_goal_execution(
+        db_path, submission.goal.id, adapter=_successful_adapter()
+    )
 
     assert [run.task_id for run in start_result.runs] == [
         submission.root_task.id,
@@ -1022,7 +1089,9 @@ def test_start_goal_execution_picks_up_newly_ready_child_in_same_pass(
     finally:
         connection.close()
 
-    start_result = start_goal_execution(db_path, submission.goal.id)
+    start_result = start_goal_execution(
+        db_path, submission.goal.id, adapter=_successful_adapter()
+    )
 
     assert [run.task_id for run in start_result.runs] == [
         submission.root_task.id,
@@ -1142,7 +1211,9 @@ def test_start_goal_execution_skips_ineligible_task_and_dispatches_later_eligibl
     finally:
         connection.close()
 
-    start_result = start_goal_execution(db_path, submission.goal.id)
+    start_result = start_goal_execution(
+        db_path, submission.goal.id, adapter=_successful_adapter()
+    )
 
     assert [run.task_id for run in start_result.runs] == ["task-worker-1"]
 

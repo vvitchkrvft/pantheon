@@ -1,11 +1,17 @@
 import sqlite3
 import subprocess
+from os import environ
 from pathlib import Path
 
 from pantheon.db import bootstrap_database, create_agent, create_group, submit_goal
 
 
-def run_pantheon(db_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_pantheon(
+    db_path: Path, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    process_env = dict(environ)
+    if env is not None:
+        process_env.update(env)
     return subprocess.run(
         [
             "uv",
@@ -18,6 +24,7 @@ def run_pantheon(db_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+        env=process_env,
     )
 
 
@@ -604,6 +611,18 @@ def test_status_prints_tasks_in_stable_order(tmp_path: Path) -> None:
 
 def test_start_executes_queued_goal_and_status_prints_runs(tmp_path: Path) -> None:
     db_path = tmp_path / "pantheon.db"
+    hermes_home = tmp_path / "hermes-home"
+    workdir = tmp_path / "workdir"
+    hermes_home.mkdir()
+    workdir.mkdir()
+    hermes_bin = tmp_path / "hermes"
+    hermes_bin.write_text(
+        "#!/bin/sh\n"
+        "printf 'adapter success\\n\\nsession_id: sess-1\\n'\n",
+        encoding="utf-8",
+    )
+    hermes_bin.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:{environ['PATH']}"}
 
     group_result = run_pantheon(db_path, "group", "init", "research")
     assert group_result.returncode == 0
@@ -619,9 +638,9 @@ def test_start_executes_queued_goal_and_status_prints_runs(tmp_path: Path) -> No
         "--role",
         "lead",
         "--hermes-home",
-        "/tmp/hermes-home",
+        str(hermes_home),
         "--workdir",
-        "/tmp/workdir",
+        str(workdir),
     )
     assert agent_result.returncode == 0
 
@@ -636,13 +655,13 @@ def test_start_executes_queued_goal_and_status_prints_runs(tmp_path: Path) -> No
     assert goal_result.returncode == 0
     goal_id = goal_result.stdout.strip().split()[2]
 
-    start_result = run_pantheon(db_path, "start", goal_id)
+    start_result = run_pantheon(db_path, "start", goal_id, env=env)
 
     assert start_result.returncode == 0
     assert start_result.stderr == ""
     assert start_result.stdout.startswith(f"started goal {goal_id} runs 1\n")
 
-    status_result = run_pantheon(db_path, "status", goal_id)
+    status_result = run_pantheon(db_path, "status", goal_id, env=env)
 
     assert status_result.returncode == 0
     assert status_result.stderr == ""

@@ -48,6 +48,7 @@ The repo also includes:
 - goal submission scaffolding that creates a queued goal and queued root task assigned to the group lead
 - a first runner slice that persists run, task, agent, and event state transitions
 - a real Hermes adapter path that invokes `hermes chat -q ... -Q --source tool` with agent-specific `HERMES_HOME` and `workdir`
+- ACP is the intended next transport-hardening path for the adapter boundary
 - same-pass dispatch of newly-ready child tasks when their parent completes
 - run-row inspection in `pantheon status <goal-id>`
 

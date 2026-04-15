@@ -13,11 +13,14 @@ Read these first:
 - Pantheon is the control plane; Hermes is the agent execution runtime.
 - Hermes is the only agent execution runtime in V1.
 - Keep the adapter boundary strict.
+- Prefer `hermes acp` as Pantheon's target long-term adapter transport; the current `hermes chat` path is an acceptable fallback until ACP lands cleanly.
+- Do not couple Pantheon to Hermes internals by importing Hermes runtime classes directly into the control plane.
 - SQLite is the source of truth.
 - TUI first, CLI second.
 - No web UI, no multi-user system, no plugin platform.
 - Do not add runtime behavior that crosses the control-plane boundary.
 - Do not define Pantheon through reference products; adjacent systems are mechanics references only.
+- HermesHQ is a mechanics reference, not an adapter-boundary blueprint.
 - Do not add `src/` layout.
 - Do not add root-level script soup.
 - Do not put binding implementation contracts in `docs/`; use `spec/`.

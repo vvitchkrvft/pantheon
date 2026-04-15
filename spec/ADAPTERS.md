@@ -38,6 +38,34 @@ run_task(agent, task, run_context) -> stream + final_result
 
 The concrete Python signature may vary, but the semantic input and output shape below is binding.
 
+## Current implementation note
+
+The current Pantheon repo implements the adapter through Hermes CLI query mode:
+
+```text
+hermes chat -q <task.input_text> -Q --source tool
+```
+
+with:
+
+- `cwd` set to the agent-specific `workdir`
+- `HERMES_HOME` set to the agent-specific Hermes home
+- optional `--model` and `--provider` flags when Pantheon agent overrides are set
+
+This is the current working implementation, not the final preferred transport.
+
+## Preferred future transport
+
+Pantheon should prefer `hermes acp` as the long-term adapter transport once the ACP client path is implemented cleanly against Pantheon's run/session boundary.
+
+Reason:
+
+- ACP is a Hermes-supported protocol surface
+- it preserves a cleaner control-plane/runtime boundary than direct runtime embedding
+- it offers structured session-oriented transport semantics that are stronger than CLI stdout scraping
+
+Until ACP lands in Pantheon, the current Hermes CLI query path is the acceptable fallback.
+
 ## Input Contract
 
 ### Agent Input
@@ -185,3 +213,6 @@ This contract does not add:
 - adapter-side retries
 - adapter-side scheduling
 - adapter-side goal logic
+- direct embedding of Hermes runtime internals inside Pantheon
+
+HermesHQ-style in-process runtime bridging may be useful as a mechanics reference for result richness and runtime hygiene, but it is not the adapter boundary Pantheon should copy. Pantheon should keep Hermes on the far side of a transport boundary rather than importing Hermes runtime classes directly into the control plane.

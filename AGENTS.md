@@ -13,7 +13,7 @@ Read these first:
 - Pantheon is the control plane; Hermes is the agent execution runtime.
 - Hermes is the only agent execution runtime in V1.
 - Keep the adapter boundary strict.
-- Prefer `hermes acp` as Pantheon's target long-term adapter transport; the current `hermes chat` path is an acceptable fallback until ACP lands cleanly.
+- Prefer `hermes acp` as Pantheon's primary adapter transport; keep the `hermes chat` path only as fallback when ACP is unusable before prompt dispatch.
 - Do not couple Pantheon to Hermes internals by importing Hermes runtime classes directly into the control plane.
 - SQLite is the source of truth.
 - TUI first, CLI second.

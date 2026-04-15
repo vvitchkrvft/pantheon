@@ -40,7 +40,15 @@ The concrete Python signature may vary, but the semantic input and output shape 
 
 ## Current implementation note
 
-The current Pantheon repo implements the adapter through Hermes CLI query mode:
+The current Pantheon repo implements the adapter with ACP as the preferred transport:
+
+```text
+hermes acp
+```
+
+Pantheon opens one ACP session for one task execution, then normalizes the resulting session output into the adapter contract.
+
+If ACP is unusable before prompt dispatch, Pantheon falls back to Hermes CLI query mode:
 
 ```text
 hermes chat -q <task.input_text> -Q --source tool
@@ -52,19 +60,11 @@ with:
 - `HERMES_HOME` set to the agent-specific Hermes home
 - optional `--model` and `--provider` flags when Pantheon agent overrides are set
 
-This is the current working implementation, not the final preferred transport.
+Current transport selection rule:
 
-## Preferred future transport
-
-Pantheon should prefer `hermes acp` as the long-term adapter transport once the ACP client path is implemented cleanly against Pantheon's run/session boundary.
-
-Reason:
-
-- ACP is a Hermes-supported protocol surface
-- it preserves a cleaner control-plane/runtime boundary than direct runtime embedding
-- it offers structured session-oriented transport semantics that are stronger than CLI stdout scraping
-
-Until ACP lands in Pantheon, the current Hermes CLI query path is the acceptable fallback.
+- prefer ACP first for every task
+- fall back to the Hermes CLI query path only if ACP is unusable before the prompt is sent
+- once a prompt has been dispatched over ACP, Pantheon keeps the task on ACP and normalizes the ACP terminal result directly
 
 ## Input Contract
 

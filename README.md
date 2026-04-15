@@ -38,6 +38,7 @@ The current CLI scaffold supports:
 - `pantheon group list`
 - `pantheon agent add --group <group-name-or-id> --name <name> --role <lead|worker> --hermes-home <path> --workdir <path> [--profile-name ...] [--model-override ...] [--provider-override ...]`
 - `pantheon goal submit "<goal text>" --group <group-name-or-id>`
+- `pantheon status <goal-id>`
 
 The repo also includes:
 - SQLite bootstrap for the V1 core tables

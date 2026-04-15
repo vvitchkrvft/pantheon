@@ -57,6 +57,15 @@ If `pyproject.toml` changes:
 - `docs/` is reserved for actual product/operator documentation.
 - `tmp/` is local scratch/reference material, gitignored, and not source of truth.
 
+## Findings Routing
+
+When a notable finding appears during repo work:
+- put binding implementation truth in `spec/`
+- put coding-agent behavior rules in `AGENTS.md`
+- put current-slice assumptions or staging notes in `spec/plans/`
+- put deferred or unresolved work in GitHub issues
+- put stable user/process preferences in memory, not repo docs
+
 ## Code Conventions
 
 - Keep changes small, testable, and spec-grounded.

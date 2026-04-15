@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+htmlcov/
+
+# Virtualenv / uv
+.venv/
+.uv-cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local state
+*.db
+*.sqlite
+*.sqlite3
+logs/
+
+# Local reference / scratch
+/tmp/

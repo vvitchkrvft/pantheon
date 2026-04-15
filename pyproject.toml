@@ -1,0 +1,34 @@
+[project]
+name = "pantheon"
+version = "0.0.1"
+description = "Local terminal-first control plane for Hermes agents"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "0kvlt Research" }]
+license = { text = "MIT" }
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.0",
+    "ruff>=0.11",
+    "pyright>=1.1",
+]
+
+[project.scripts]
+pantheon = "pantheon.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests requiring external services (API keys, Modal, etc.)",
+]
+addopts = "-m 'not integration' -n auto"
+
+[tool.uv]
+package = true

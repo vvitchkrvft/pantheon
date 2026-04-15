@@ -190,3 +190,137 @@ def test_agent_add_rejects_second_lead_in_group(tmp_path: Path) -> None:
         connection.close()
 
     assert count == (1,)
+
+
+def test_goal_submit_creates_goal_and_root_task(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group_result = run_pantheon(db_path, "group", "init", "research")
+    assert group_result.returncode == 0
+
+    lead_result = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "lead-1",
+        "--role",
+        "lead",
+        "--hermes-home",
+        "/tmp/hermes-home",
+        "--workdir",
+        "/tmp/workdir",
+    )
+    assert lead_result.returncode == 0
+
+    result = run_pantheon(
+        db_path,
+        "goal",
+        "submit",
+        "Ship the first Pantheon slice",
+        "--group",
+        "research",
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.startswith("created goal ")
+    assert " root_task " in result.stdout
+
+    columns = result.stdout.strip().split()
+    assert len(columns) == 5
+    assert columns[0] == "created"
+    assert columns[1] == "goal"
+    assert columns[3] == "root_task"
+
+    goal_id = columns[2]
+    root_task_id = columns[4]
+
+    connection = sqlite3.connect(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT id, title, status, root_task_id
+            FROM goals
+            """
+        ).fetchone()
+        task_row = connection.execute(
+            """
+            SELECT tasks.id, tasks.goal_id, tasks.assigned_agent_id, tasks.title, tasks.input_text, tasks.status, tasks.depth, agents.role
+            FROM tasks
+            JOIN agents ON agents.id = tasks.assigned_agent_id
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert goal_row == (
+        goal_id,
+        "Ship the first Pantheon slice",
+        "queued",
+        root_task_id,
+    )
+    assert task_row is not None
+    assert task_row[0] == root_task_id
+    assert task_row[2] is not None
+    assert task_row[3] == "Ship the first Pantheon slice"
+    assert task_row[4] == "Ship the first Pantheon slice"
+    assert task_row[5] == "queued"
+    assert task_row[6] == 0
+    assert task_row[7] == "lead"
+
+
+def test_goal_submit_fails_when_group_is_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    result = run_pantheon(
+        db_path,
+        "goal",
+        "submit",
+        "Ship the first Pantheon slice",
+        "--group",
+        "missing",
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "group not found\n"
+
+
+def test_goal_submit_fails_when_group_has_no_lead(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group_result = run_pantheon(db_path, "group", "init", "research")
+    assert group_result.returncode == 0
+
+    worker_result = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "worker-1",
+        "--role",
+        "worker",
+        "--hermes-home",
+        "/tmp/hermes-home",
+        "--workdir",
+        "/tmp/workdir",
+    )
+    assert worker_result.returncode == 0
+
+    result = run_pantheon(
+        db_path,
+        "goal",
+        "submit",
+        "Ship the first Pantheon slice",
+        "--group",
+        "research",
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "group has no lead agent\n"

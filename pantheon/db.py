@@ -207,6 +207,43 @@ class AgentRecord:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class GoalRecord:
+    id: str
+    group_id: str
+    title: str
+    status: str
+    root_task_id: str | None
+    started_at: str | None
+    completed_at: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class TaskRecord:
+    id: str
+    goal_id: str
+    parent_task_id: str | None
+    assigned_agent_id: str
+    title: str
+    input_text: str
+    result_text: str | None
+    status: str
+    priority: int
+    depth: int
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class GoalSubmissionRecord:
+    goal: GoalRecord
+    root_task: TaskRecord
+
+
 def connect_database(db_path: PathLike) -> sqlite3.Connection:
     bootstrap_database(db_path)
     connection = sqlite3.connect(Path(db_path))
@@ -364,6 +401,128 @@ def create_agent(
     )
 
 
+def submit_goal(
+    db_path: PathLike, *, group_name_or_id: str, goal_text: str
+) -> GoalSubmissionRecord:
+    group_ref = group_name_or_id.strip()
+    title = goal_text.strip()
+
+    if not group_ref:
+        raise ValueError("group is required")
+    if not title:
+        raise ValueError("goal text must not be empty")
+
+    connection = connect_database(db_path)
+    try:
+        group_id = _resolve_group_id(connection, group_ref)
+        if group_id is None:
+            raise ValueError("group not found")
+
+        lead_agent = _resolve_group_lead_agent(connection, group_id)
+        if lead_agent is None:
+            raise ValueError("group has no lead agent")
+
+        timestamp = _utc_now()
+        goal_id = str(uuid4())
+        root_task_id = str(uuid4())
+
+        connection.execute(
+            """
+            INSERT INTO goals (
+                id,
+                group_id,
+                title,
+                status,
+                root_task_id,
+                started_at,
+                completed_at,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (goal_id, group_id, title, "queued", None, None, None, timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                root_task_id,
+                goal_id,
+                None,
+                lead_agent.id,
+                title,
+                title,
+                None,
+                "queued",
+                5,
+                0,
+                timestamp,
+                None,
+                None,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE goals
+            SET root_task_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (root_task_id, timestamp, goal_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return GoalSubmissionRecord(
+        goal=GoalRecord(
+            id=goal_id,
+            group_id=group_id,
+            title=title,
+            status="queued",
+            root_task_id=root_task_id,
+            started_at=None,
+            completed_at=None,
+            created_at=timestamp,
+            updated_at=timestamp,
+        ),
+        root_task=TaskRecord(
+            id=root_task_id,
+            goal_id=goal_id,
+            parent_task_id=None,
+            assigned_agent_id=lead_agent.id,
+            title=title,
+            input_text=title,
+            result_text=None,
+            status="queued",
+            priority=5,
+            depth=0,
+            created_at=timestamp,
+            started_at=None,
+            completed_at=None,
+            updated_at=timestamp,
+        ),
+    )
+
+
 def _resolve_group_id(connection: sqlite3.Connection, group_name_or_id: str) -> str | None:
     row = connection.execute(
         """
@@ -391,6 +550,49 @@ def _group_has_lead(connection: sqlite3.Connection, group_id: str) -> bool:
         (group_id,),
     ).fetchone()
     return row is not None
+
+
+def _resolve_group_lead_agent(
+    connection: sqlite3.Connection, group_id: str
+) -> AgentRecord | None:
+    row = connection.execute(
+        """
+        SELECT
+            id,
+            group_id,
+            name,
+            role,
+            profile_name,
+            hermes_home,
+            workdir,
+            model_override,
+            provider_override,
+            status,
+            created_at,
+            updated_at
+        FROM agents
+        WHERE group_id = ? AND role = 'lead'
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        """,
+        (group_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return AgentRecord(
+        id=row["id"],
+        group_id=row["group_id"],
+        name=row["name"],
+        role=row["role"],
+        profile_name=row["profile_name"],
+        hermes_home=row["hermes_home"],
+        workdir=row["workdir"],
+        model_override=row["model_override"],
+        provider_override=row["provider_override"],
+        status=row["status"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
 
 
 def _normalize_optional_text(value: str | None) -> str | None:

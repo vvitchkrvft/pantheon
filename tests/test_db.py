@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from pantheon.db import bootstrap_database, create_agent, create_group
+from pantheon.db import bootstrap_database, create_agent, create_group, submit_goal
 
 
 EXPECTED_TABLE_COLUMNS = {
@@ -240,4 +240,102 @@ def test_create_agent_rejects_second_lead_in_group(tmp_path: Path) -> None:
             role="lead",
             hermes_home="/tmp/hermes-home-2",
             workdir="/tmp/workdir-2",
+        )
+
+
+def test_submit_goal_creates_goal_and_root_task_for_group_lead(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.name,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    assert submission.goal.group_id == group.id
+    assert submission.goal.title == "Ship the first Pantheon slice"
+    assert submission.goal.status == "queued"
+    assert submission.goal.root_task_id == submission.root_task.id
+    assert submission.root_task.goal_id == submission.goal.id
+    assert submission.root_task.assigned_agent_id == lead.id
+    assert submission.root_task.title == "Ship the first Pantheon slice"
+    assert submission.root_task.input_text == "Ship the first Pantheon slice"
+    assert submission.root_task.status == "queued"
+    assert submission.root_task.depth == 0
+
+    connection = sqlite3.connect(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT id, group_id, title, status, root_task_id
+            FROM goals
+            """
+        ).fetchone()
+        task_row = connection.execute(
+            """
+            SELECT id, goal_id, parent_task_id, assigned_agent_id, title, input_text, status, depth
+            FROM tasks
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert goal_row == (
+        submission.goal.id,
+        group.id,
+        "Ship the first Pantheon slice",
+        "queued",
+        submission.root_task.id,
+    )
+    assert task_row == (
+        submission.root_task.id,
+        submission.goal.id,
+        None,
+        lead.id,
+        "Ship the first Pantheon slice",
+        "Ship the first Pantheon slice",
+        "queued",
+        0,
+    )
+
+
+def test_submit_goal_rejects_missing_group(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    with pytest.raises(ValueError, match="group not found"):
+        submit_goal(
+            db_path,
+            group_name_or_id="missing",
+            goal_text="Ship the first Pantheon slice",
+        )
+
+
+def test_submit_goal_rejects_group_without_lead(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="worker-1",
+        role="worker",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+
+    with pytest.raises(ValueError, match="group has no lead agent"):
+        submit_goal(
+            db_path,
+            group_name_or_id=group.name,
+            goal_text="Ship the first Pantheon slice",
         )

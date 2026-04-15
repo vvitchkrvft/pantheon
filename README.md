@@ -42,6 +42,8 @@ The current CLI supports:
 - `pantheon goal submit "<goal text>" --group <group-name-or-id>`
 - `pantheon start <goal-id>`
 - `pantheon status <goal-id>`
+- `pantheon inspect task <task-id>`
+- `pantheon inspect run <run-id>`
 
 The repo also includes:
 - SQLite bootstrap for the V1 core tables
@@ -49,7 +51,8 @@ The repo also includes:
 - goal submission scaffolding that creates a queued goal and queued root task assigned to the group lead
 - a first runner slice that persists run, task, agent, and event state transitions
 - an ACP-backed Hermes adapter path that prefers `hermes acp` and falls back to `hermes chat -q ... -Q --source tool` when ACP is unusable before prompt dispatch
-- richer adapter result normalization including structured `session_id` and `usage_json` when ACP provides them
+- richer adapter result normalization including structured `session_id` and ACP-provided `usage_json`
+- ACP-native event/result enrichment with normalized stdout, stderr, lifecycle, and structured output events
 - structured lead-output handling for `task_proposal` and `completion_judgment`
 - same-pass dispatch of newly-ready child tasks when their parent completes
 - run-row inspection in `pantheon status <goal-id>`
@@ -59,7 +62,7 @@ The repo also includes:
 Pantheon does not yet have:
 - a working TUI
 - full ACP-native progress/thinking/tool-event mapping into Pantheon's event model
-- broader goal/task/run inspection surfaces beyond the current CLI status output
+- broader goal/task/run inspection surfaces beyond the current CLI status and inspect output
 - deeper operator controls around retry/cancel/inspection workflows
 
 ## Local Setup
@@ -88,6 +91,8 @@ UV_CACHE_DIR=.uv-cache uv run pantheon agent add --group research --name lead-1 
 UV_CACHE_DIR=.uv-cache uv run pantheon goal submit "Ship the first Pantheon slice" --group research
 UV_CACHE_DIR=.uv-cache uv run pantheon start <goal-id>
 UV_CACHE_DIR=.uv-cache uv run pantheon status <goal-id>
+UV_CACHE_DIR=.uv-cache uv run pantheon inspect task <task-id>
+UV_CACHE_DIR=.uv-cache uv run pantheon inspect run <run-id>
 ```
 
 ## Repository Layout

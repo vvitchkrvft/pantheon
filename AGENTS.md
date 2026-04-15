@@ -3,7 +3,10 @@
 Read these first:
 1. `spec/PANTHEON_DOCTRINE.md`
 2. `spec/PANTHEON_V1_BRIEF.md`
-3. `spec/plans/2026-04-15-pantheon-phase-0-contract-and-group-slice.md`
+3. `spec/ADAPTERS.md`
+4. `spec/RUNNER.md`
+5. `spec/CLI_TUI.md`
+6. `spec/plans/2026-04-15-pantheon-phase-0-contract-and-group-slice.md`
 
 ## Critical Rules
 

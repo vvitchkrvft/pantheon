@@ -10,8 +10,8 @@ Pantheon is in early development.
 
 Current phase:
 - first real execution slice is implemented
-- control-plane persistence, dispatch, and status inspection are working against a stub Hermes adapter boundary
-- real Hermes runtime execution and structured lead control payloads are still deferred
+- control-plane persistence, dispatch, and status inspection are working against a real Hermes adapter path
+- structured lead control payloads and goal completion from lead judgments are still deferred
 
 The binding product contract lives in `spec/`.
 
@@ -47,7 +47,7 @@ The repo also includes:
 - agent registry scaffolding with one-lead-per-group enforcement
 - goal submission scaffolding that creates a queued goal and queued root task assigned to the group lead
 - a first runner slice that persists run, task, agent, and event state transitions
-- a stub Hermes adapter boundary that normalizes one task execution without mutating Pantheon state directly
+- a real Hermes adapter path that invokes `hermes chat -q ... -Q --source tool` with agent-specific `HERMES_HOME` and `workdir`
 - same-pass dispatch of newly-ready child tasks when their parent completes
 - run-row inspection in `pantheon status <goal-id>`
 
@@ -55,10 +55,9 @@ The repo also includes:
 
 Pantheon does not yet have:
 - a working TUI
-- real Hermes adapter execution
 - structured lead-agent control payload handling (`task_proposal`, `completion_judgment`)
 - goal completion logic driven by valid lead completion judgments
-- live run streaming beyond the current stub execution path
+- richer live run streaming and inspection beyond the current process-capture path
 - broader goal/task/run inspection surfaces beyond the current CLI status output
 
 ## Local Setup

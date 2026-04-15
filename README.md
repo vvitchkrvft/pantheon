@@ -9,8 +9,9 @@ It owns orchestration state, task dispatch, run supervision, live terminal visib
 Pantheon is in early development.
 
 Current phase:
-- locking implementation contracts
-- building the first SQLite + CLI slice
+- first real execution slice is implemented
+- control-plane persistence, dispatch, and status inspection are working against a stub Hermes adapter boundary
+- real Hermes runtime execution and structured lead control payloads are still deferred
 
 The binding product contract lives in `spec/`.
 
@@ -33,26 +34,32 @@ Core control-plane objects:
 
 ## Implemented So Far
 
-The current CLI scaffold supports:
+The current CLI supports:
 - `pantheon group init <name>`
 - `pantheon group list`
 - `pantheon agent add --group <group-name-or-id> --name <name> --role <lead|worker> --hermes-home <path> --workdir <path> [--profile-name ...] [--model-override ...] [--provider-override ...]`
 - `pantheon goal submit "<goal text>" --group <group-name-or-id>`
+- `pantheon start <goal-id>`
 - `pantheon status <goal-id>`
 
 The repo also includes:
 - SQLite bootstrap for the V1 core tables
 - agent registry scaffolding with one-lead-per-group enforcement
 - goal submission scaffolding that creates a queued goal and queued root task assigned to the group lead
+- a first runner slice that persists run, task, agent, and event state transitions
+- a stub Hermes adapter boundary that normalizes one task execution without mutating Pantheon state directly
+- same-pass dispatch of newly-ready child tasks when their parent completes
+- run-row inspection in `pantheon status <goal-id>`
 
 ## Not Built Yet
 
 Pantheon does not yet have:
 - a working TUI
-- Hermes adapter execution
-- runner/orchestrator execution behavior in code
-- goal/task/run inspection beyond the current scaffold
-- live run streaming, logs, and final result inspection
+- real Hermes adapter execution
+- structured lead-agent control payload handling (`task_proposal`, `completion_judgment`)
+- goal completion logic driven by valid lead completion judgments
+- live run streaming beyond the current stub execution path
+- broader goal/task/run inspection surfaces beyond the current CLI status output
 
 ## Local Setup
 
@@ -72,6 +79,16 @@ Run the current scaffold:
 UV_CACHE_DIR=.uv-cache uv run pantheon
 ```
 
+Example current flow:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run pantheon group init research
+UV_CACHE_DIR=.uv-cache uv run pantheon agent add --group research --name lead-1 --role lead --hermes-home /tmp/hermes-home --workdir /tmp/workdir
+UV_CACHE_DIR=.uv-cache uv run pantheon goal submit "Ship the first Pantheon slice" --group research
+UV_CACHE_DIR=.uv-cache uv run pantheon start <goal-id>
+UV_CACHE_DIR=.uv-cache uv run pantheon status <goal-id>
+```
+
 ## Repository Layout
 
 - `spec/` — binding product and implementation contracts
@@ -85,4 +102,7 @@ UV_CACHE_DIR=.uv-cache uv run pantheon
 
 - `spec/PANTHEON_DOCTRINE.md`
 - `spec/PANTHEON_V1_BRIEF.md`
+- `spec/ADAPTERS.md`
+- `spec/RUNNER.md`
+- `spec/CLI_TUI.md`
 - `spec/plans/2026-04-15-pantheon-phase-0-contract-and-group-slice.md`

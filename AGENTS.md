@@ -56,6 +56,7 @@ If `pyproject.toml` changes:
 - `tests/` holds automated verification.
 - `docs/` is reserved for actual product/operator documentation.
 - `tmp/` is local scratch/reference material, gitignored, and not source of truth.
+- `tmp/reference/` holds read-only cross-reference repos; exclude it from checks, tests, and typechecking unless a task explicitly targets that material.
 
 ## Findings Routing
 

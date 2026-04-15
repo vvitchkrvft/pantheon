@@ -15,6 +15,7 @@ from pantheon.db import (
     list_groups,
     submit_goal,
 )
+from pantheon.runner import start_goal_execution
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     goal_submit_parser.add_argument("goal_text")
     goal_submit_parser.add_argument("--group", required=True)
 
+    start_parser = subparsers.add_parser("start")
+    start_parser.add_argument("goal_id")
+
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("goal_id")
 
@@ -67,6 +71,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _handle_agent_command(args)
     if args.command == "goal":
         return _handle_goal_command(args)
+    if args.command == "start":
+        return _handle_start_command(args)
     if args.command == "status":
         return _handle_status_command(args)
 
@@ -164,6 +170,20 @@ def _handle_status_command(args: argparse.Namespace) -> int:
             print(
                 f"task\t{task.id}\t{task.assigned_agent_id}\t{task.title}\t{task.status}\t{task.depth}"
             )
+        for run in goal.runs:
+            print(
+                f"run\t{run.id}\t{run.attempt_number}\t{run.status}\t{run.task_id}\t{run.agent_id}\t{run.started_at or ''}\t{run.finished_at or ''}"
+            )
+        return 0
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def _handle_start_command(args: argparse.Namespace) -> int:
+    try:
+        result = start_goal_execution(args.db, args.goal_id)
+        print(f"started goal {result.goal_id} runs {len(result.runs)}")
         return 0
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

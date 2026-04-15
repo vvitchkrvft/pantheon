@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -169,20 +170,6 @@ SCHEMA_STATEMENTS = (
 )
 
 
-def bootstrap_database(db_path: PathLike) -> None:
-    path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute("PRAGMA foreign_keys = ON")
-        for statement in SCHEMA_STATEMENTS:
-            connection.execute(statement)
-        connection.commit()
-    finally:
-        connection.close()
-
-
 @dataclass(frozen=True)
 class GroupRecord:
     id: str
@@ -239,6 +226,36 @@ class TaskRecord:
 
 
 @dataclass(frozen=True)
+class RunRecord:
+    id: str
+    task_id: str
+    agent_id: str
+    attempt_number: int
+    status: str
+    session_id: str | None
+    pid: int | None
+    exit_code: int | None
+    error_text: str | None
+    log_path: str
+    usage_json: str | None
+    started_at: str | None
+    finished_at: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class EventRecord:
+    id: str
+    goal_id: str | None
+    task_id: str | None
+    run_id: str | None
+    agent_id: str | None
+    event_type: str
+    payload_json: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class GoalSubmissionRecord:
     goal: GoalRecord
     root_task: TaskRecord
@@ -254,12 +271,38 @@ class GoalStatusTaskRecord:
 
 
 @dataclass(frozen=True)
+class GoalStatusRunRecord:
+    id: str
+    task_id: str
+    agent_id: str
+    attempt_number: int
+    status: str
+    started_at: str | None
+    finished_at: str | None
+
+
+@dataclass(frozen=True)
 class GoalStatusRecord:
     id: str
     title: str
     status: str
     root_task_id: str | None
     tasks: list[GoalStatusTaskRecord]
+    runs: list[GoalStatusRunRecord]
+
+
+def bootstrap_database(db_path: PathLike) -> None:
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for statement in SCHEMA_STATEMENTS:
+            connection.execute(statement)
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def connect_database(db_path: PathLike) -> sqlite3.Connection:
@@ -312,15 +355,7 @@ def list_groups(db_path: PathLike) -> list[GroupRecord]:
     finally:
         connection.close()
 
-    return [
-        GroupRecord(
-            id=row["id"],
-            name=row["name"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-        for row in rows
-    ]
+    return [GroupRecord(**dict(row)) for row in rows]
 
 
 def create_agent(
@@ -568,6 +603,16 @@ def get_goal_status(db_path: PathLike, goal_id: str) -> GoalStatusRecord:
             """,
             (normalized_goal_id,),
         ).fetchall()
+        run_rows = connection.execute(
+            """
+            SELECT runs.id, runs.task_id, runs.agent_id, runs.attempt_number, runs.status, runs.started_at, runs.finished_at
+            FROM runs
+            JOIN tasks ON tasks.id = runs.task_id
+            WHERE tasks.goal_id = ?
+            ORDER BY runs.created_at ASC, runs.id ASC
+            """,
+            (normalized_goal_id,),
+        ).fetchall()
     finally:
         connection.close()
 
@@ -586,6 +631,195 @@ def get_goal_status(db_path: PathLike, goal_id: str) -> GoalStatusRecord:
             )
             for row in task_rows
         ],
+        runs=[
+            GoalStatusRunRecord(
+                id=row["id"],
+                task_id=row["task_id"],
+                agent_id=row["agent_id"],
+                attempt_number=row["attempt_number"],
+                status=row["status"],
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+            )
+            for row in run_rows
+        ],
+    )
+
+
+def get_events_for_goal(db_path: PathLike, goal_id: str) -> list[EventRecord]:
+    connection = connect_database(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, goal_id, task_id, run_id, agent_id, event_type, payload_json, created_at
+            FROM events
+            WHERE goal_id = ?
+            ORDER BY created_at ASC, rowid ASC
+            """,
+            (goal_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [EventRecord(**dict(row)) for row in rows]
+
+
+def resolve_goal_for_start(
+    connection: sqlite3.Connection, goal_id: str
+) -> tuple[GoalRecord, TaskRecord]:
+    normalized_goal_id = goal_id.strip()
+    if not normalized_goal_id:
+        raise ValueError("goal id is required")
+
+    goal_row = connection.execute(
+        """
+        SELECT id, group_id, title, status, root_task_id, started_at, completed_at, created_at, updated_at
+        FROM goals
+        WHERE id = ?
+        """,
+        (normalized_goal_id,),
+    ).fetchone()
+    if goal_row is None:
+        raise ValueError("goal not found")
+    if goal_row["status"] != "queued":
+        raise ValueError(f"goal is not startable from state {goal_row['status']}")
+    if goal_row["root_task_id"] is None:
+        raise ValueError("goal has no root task")
+
+    task_row = connection.execute(
+        """
+        SELECT
+            id,
+            goal_id,
+            parent_task_id,
+            assigned_agent_id,
+            title,
+            input_text,
+            result_text,
+            status,
+            priority,
+            depth,
+            created_at,
+            started_at,
+            completed_at,
+            updated_at
+        FROM tasks
+        WHERE id = ?
+        """,
+        (goal_row["root_task_id"],),
+    ).fetchone()
+    if task_row is None:
+        raise ValueError("goal root task not found")
+    if task_row["status"] != "queued":
+        raise ValueError(f"goal is not startable from root task state {task_row['status']}")
+
+    return _goal_from_row(goal_row), _task_from_row(task_row)
+
+
+def list_queued_tasks_for_goal(connection: sqlite3.Connection, goal_id: str) -> list[TaskRecord]:
+    rows = connection.execute(
+        """
+        SELECT
+            id,
+            goal_id,
+            parent_task_id,
+            assigned_agent_id,
+            title,
+            input_text,
+            result_text,
+            status,
+            priority,
+            depth,
+            created_at,
+            started_at,
+            completed_at,
+            updated_at
+        FROM tasks
+        WHERE goal_id = ? AND status = 'queued'
+        ORDER BY depth ASC, priority ASC, created_at ASC, id ASC
+        """,
+        (goal_id,),
+    ).fetchall()
+    return [_task_from_row(row) for row in rows]
+
+
+def get_agent_for_task(connection: sqlite3.Connection, task: TaskRecord) -> AgentRecord:
+    row = connection.execute(
+        """
+        SELECT
+            agents.id,
+            agents.group_id,
+            agents.name,
+            agents.role,
+            agents.profile_name,
+            agents.hermes_home,
+            agents.workdir,
+            agents.model_override,
+            agents.provider_override,
+            agents.status,
+            agents.created_at,
+            agents.updated_at
+        FROM agents
+        JOIN goals ON goals.group_id = agents.group_id
+        WHERE goals.id = ? AND agents.id = ?
+        """,
+        (task.goal_id, task.assigned_agent_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("assigned agent not found for task")
+    return _agent_from_row(row)
+
+
+def count_active_runs_for_agent(connection: sqlite3.Connection, agent_id: str) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM runs
+        WHERE agent_id = ? AND status IN ('queued', 'running')
+        """,
+        (agent_id,),
+    ).fetchone()
+    return int(row[0])
+
+
+def next_run_attempt_number(connection: sqlite3.Connection, task_id: str) -> int:
+    row = connection.execute(
+        """
+        SELECT COALESCE(MAX(attempt_number), 0) + 1
+        FROM runs
+        WHERE task_id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    return int(row[0])
+
+
+def insert_event(
+    connection: sqlite3.Connection,
+    *,
+    goal_id: str | None,
+    task_id: str | None,
+    run_id: str | None,
+    agent_id: str | None,
+    event_type: str,
+    payload: dict[str, object],
+    created_at: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO events (id, goal_id, task_id, run_id, agent_id, event_type, payload_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid4()),
+            goal_id,
+            task_id,
+            run_id,
+            agent_id,
+            event_type,
+            json.dumps(payload, sort_keys=True),
+            created_at,
+        ),
     )
 
 
@@ -645,6 +879,43 @@ def _resolve_group_lead_agent(
     ).fetchone()
     if row is None:
         return None
+    return _agent_from_row(row)
+
+
+def _goal_from_row(row: sqlite3.Row) -> GoalRecord:
+    return GoalRecord(
+        id=row["id"],
+        group_id=row["group_id"],
+        title=row["title"],
+        status=row["status"],
+        root_task_id=row["root_task_id"],
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _task_from_row(row: sqlite3.Row) -> TaskRecord:
+    return TaskRecord(
+        id=row["id"],
+        goal_id=row["goal_id"],
+        parent_task_id=row["parent_task_id"],
+        assigned_agent_id=row["assigned_agent_id"],
+        title=row["title"],
+        input_text=row["input_text"],
+        result_text=row["result_text"],
+        status=row["status"],
+        priority=row["priority"],
+        depth=row["depth"],
+        created_at=row["created_at"],
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _agent_from_row(row: sqlite3.Row) -> AgentRecord:
     return AgentRecord(
         id=row["id"],
         group_id=row["group_id"],

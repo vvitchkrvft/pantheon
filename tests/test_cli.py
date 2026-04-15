@@ -600,3 +600,111 @@ def test_status_prints_tasks_in_stable_order(tmp_path: Path) -> None:
         "task\ttask-depth-1-tie-b\tagent-1\tTie B\tqueued\t1",
         "task\ttask-depth-1-late\tagent-1\tLate child\tqueued\t1",
     ]
+
+
+def test_start_executes_queued_goal_and_status_prints_runs(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group_result = run_pantheon(db_path, "group", "init", "research")
+    assert group_result.returncode == 0
+
+    agent_result = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "lead-1",
+        "--role",
+        "lead",
+        "--hermes-home",
+        "/tmp/hermes-home",
+        "--workdir",
+        "/tmp/workdir",
+    )
+    assert agent_result.returncode == 0
+
+    goal_result = run_pantheon(
+        db_path,
+        "goal",
+        "submit",
+        "Ship the first Pantheon slice",
+        "--group",
+        "research",
+    )
+    assert goal_result.returncode == 0
+    goal_id = goal_result.stdout.strip().split()[2]
+
+    start_result = run_pantheon(db_path, "start", goal_id)
+
+    assert start_result.returncode == 0
+    assert start_result.stderr == ""
+    assert start_result.stdout.startswith(f"started goal {goal_id} runs 1\n")
+
+    status_result = run_pantheon(db_path, "status", goal_id)
+
+    assert status_result.returncode == 0
+    assert status_result.stderr == ""
+    lines = status_result.stdout.splitlines()
+    assert lines[0].startswith(f"goal\t{goal_id}\tShip the first Pantheon slice\trunning\t")
+    assert lines[1].endswith("\tcomplete\t0")
+    assert lines[2].startswith("run\t")
+    run_columns = lines[2].split("\t")
+    assert run_columns[2] == "1"
+    assert run_columns[3] == "complete"
+    assert run_columns[4] == lines[1].split("\t")[1]
+
+
+def test_start_fails_when_goal_is_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    result = run_pantheon(db_path, "start", "missing-goal")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "goal not found\n"
+
+
+def test_start_fails_when_goal_is_not_startable(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group_result = run_pantheon(db_path, "group", "init", "research")
+    assert group_result.returncode == 0
+
+    agent_result = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "lead-1",
+        "--role",
+        "lead",
+        "--hermes-home",
+        "/tmp/hermes-home",
+        "--workdir",
+        "/tmp/workdir",
+    )
+    assert agent_result.returncode == 0
+
+    goal_result = run_pantheon(
+        db_path,
+        "goal",
+        "submit",
+        "Ship the first Pantheon slice",
+        "--group",
+        "research",
+    )
+    assert goal_result.returncode == 0
+    goal_id = goal_result.stdout.strip().split()[2]
+
+    first_start = run_pantheon(db_path, "start", goal_id)
+    assert first_start.returncode == 0
+
+    second_start = run_pantheon(db_path, "start", goal_id)
+
+    assert second_start.returncode == 1
+    assert second_start.stdout == ""
+    assert second_start.stderr == "goal is not startable from state running\n"

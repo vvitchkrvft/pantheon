@@ -18,6 +18,31 @@ Footer {
     dock: bottom;
 }
 
+#group-selector-modal {
+    width: 72;
+    height: 20;
+    margin: 6 12;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+
+#group-selector-title {
+    height: auto;
+    padding-bottom: 1;
+    text-style: bold;
+}
+
+#group-selector-list {
+    height: 1fr;
+}
+
+#group-selector-hint {
+    height: auto;
+    padding-top: 1;
+    color: $text-muted;
+}
+
 .panel {
     border: round $primary;
     height: 1fr;

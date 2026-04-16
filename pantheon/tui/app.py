@@ -12,6 +12,7 @@ from textual.widgets import Footer, Header, Static
 from pantheon.db import GroupRecord, PathLike, bootstrap_database, list_groups, resolve_current_group_id
 from pantheon.tui.screens.agents import AgentsScreen
 from pantheon.tui.screens.goals import GoalsScreen
+from pantheon.tui.screens.group_selector import GroupSelectorScreen
 from pantheon.tui.screens.overview import OverviewScreen
 from pantheon.tui.screens.runs import RunsScreen
 from pantheon.tui.screens.settings import SettingsScreen
@@ -40,6 +41,7 @@ class PantheonApp(App[None]):
         Binding("4", "go_to_screen('tasks')", "Tasks"),
         Binding("5", "go_to_screen('runs')", "Runs"),
         Binding("6", "go_to_screen('settings')", "Settings"),
+        Binding("g", "open_group_selector", "Group Selector"),
         Binding("[", "previous_group", "Prev Group"),
         Binding("]", "next_group", "Next Group"),
         Binding("q", "quit", "Quit"),
@@ -89,6 +91,15 @@ class PantheonApp(App[None]):
     def action_next_group(self) -> None:
         self._cycle_group(1)
 
+    def action_open_group_selector(self) -> None:
+        self._reload_groups()
+        if not self._groups:
+            return
+        self.push_screen(
+            GroupSelectorScreen(self._groups, self.current_group_id),
+            callback=self._handle_group_selector_dismissed,
+        )
+
     def watch_current_group_id(self, old_value: str | None, new_value: str | None) -> None:
         if old_value == new_value:
             return
@@ -113,7 +124,20 @@ class PantheonApp(App[None]):
             )
 
         target_index = (current_index + direction) % len(self._groups)
-        self.current_group_id = self._groups[target_index].id
+        self.select_group(self._groups[target_index].id)
+
+    def select_group(self, group_id: str | None) -> None:
+        if group_id is None:
+            self.current_group_id = None
+            return
+        self._reload_groups()
+        if any(group.id == group_id for group in self._groups):
+            self.current_group_id = group_id
+
+    def _handle_group_selector_dismissed(self, selected_group_id: str | None) -> None:
+        if selected_group_id is None:
+            return
+        self.select_group(selected_group_id)
 
     def _update_shell_context(self) -> None:
         screen_title = dict(SCREEN_ORDER).get(self.current_screen_name, "Overview")
@@ -121,7 +145,7 @@ class PantheonApp(App[None]):
         self.sub_title = f"{screen_title} | {group_label}"
         if self.is_mounted:
             self.query_one("#current-group-context", Static).update(
-                f"Current Group: {group_label}    [ / ] switch groups"
+                f"Current Group: {group_label}    g open selector    [ / ] cycle groups"
             )
 
     def _current_group_label(self) -> str:

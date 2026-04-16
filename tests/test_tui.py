@@ -2,11 +2,12 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
-from textual.widgets import Static
+from textual.widgets import ListView, Static
 
 from pantheon.db import bootstrap_database, create_agent, create_group, submit_goal
 from pantheon.tui import PantheonApp
 from pantheon.tui.screens.agents import AgentsScreen
+from pantheon.tui.screens.group_selector import GroupSelectorScreen
 from pantheon.tui.screens.goals import GoalsScreen
 from pantheon.tui.screens.runs import RunsScreen
 from pantheon.tui.screens.tasks import TasksScreen
@@ -586,6 +587,75 @@ def test_keyboard_group_switch_updates_current_group_context(tmp_path: Path) -> 
     asyncio.run(run_test())
 
 
+def test_group_selector_opens_from_shell(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("5")
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GroupSelectorScreen)
+            selector = app.screen.query_one("#group-selector-list", ListView)
+            assert selector is not None
+
+    asyncio.run(run_test())
+
+
+def test_group_selector_keyboard_navigation_tracks_highlight(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    alpha = _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("g")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GroupSelectorScreen)
+            list_view = app.screen.query_one("#group-selector-list", ListView)
+            assert list_view.index == 0
+            assert alpha["group_id"] in str(list_view.children[0].query_one(Static).content)
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert list_view.index == 1
+            assert beta["group_id"] in str(list_view.children[1].query_one(Static).content)
+
+            await pilot.press("up")
+            await pilot.pause()
+            assert list_view.index == 0
+
+    asyncio.run(run_test())
+
+
+def test_group_selector_choose_specific_group_updates_context(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            context = app.query_one("#current-group-context", Static)
+
+            await pilot.press("g")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await pilot.pause()
+
+            assert app.current_group_id == beta["group_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+    asyncio.run(run_test())
+
+
 def test_active_screen_refreshes_after_group_switch(tmp_path: Path) -> None:
     db_path = tmp_path / "pantheon.db"
     _seed_readonly_tui_data(db_path)
@@ -602,6 +672,33 @@ def test_active_screen_refreshes_after_group_switch(tmp_path: Path) -> None:
 
             await pilot.press("]")
             await pilot.pause()
+            assert app.current_group_id == beta["group_id"]
+            assert app.screen.selected_goal_id == beta["goal_id"]
+            assert "title: Ship slice C" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_active_screen_refreshes_after_explicit_group_selection(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("3")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalsScreen)
+            detail = app.screen.query_one("#goals-detail", Static)
+            assert "title: Ship slice A" in str(detail.content)
+
+            await pilot.press("g")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalsScreen)
             assert app.current_group_id == beta["group_id"]
             assert app.screen.selected_goal_id == beta["goal_id"]
             assert "title: Ship slice C" in str(detail.content)
@@ -632,6 +729,30 @@ def test_group_switch_revalidates_screen_selection(tmp_path: Path) -> None:
             assert app.current_group_id == beta["group_id"]
             assert app.screen.selected_agent_id == beta["lead_id"]
             assert "name: lead-2" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_group_selector_cancel_keeps_current_group(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    alpha = _seed_readonly_tui_data(db_path)
+    _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            context = app.query_one("#current-group-context", Static)
+
+            await pilot.press("g")
+            await pilot.pause()
+            assert isinstance(app.screen, GroupSelectorScreen)
+
+            await pilot.press("down", "escape")
+            await pilot.pause()
+
+            assert app.current_group_id == alpha["group_id"]
+            assert "Current Group: alpha (1/2)" in str(context.content)
+            assert not isinstance(app.screen, GroupSelectorScreen)
 
     asyncio.run(run_test())
 

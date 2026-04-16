@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, cast
 
 from textual.app import ComposeResult
@@ -11,9 +12,12 @@ from textual.screen import Screen
 from textual.widgets import Static
 
 from pantheon.db import (
+    EventRecord,
     GoalDetailRecord,
     RunInspectionRecord,
     TaskDetailRecord,
+    get_events_for_goal,
+    get_events_for_run,
     get_goal_for_tui,
     get_run_for_inspection,
     get_task_for_tui,
@@ -77,6 +81,7 @@ class GoalInspectionScreen(InspectionScreen):
 
     BINDINGS = [
         *InspectionScreen.BINDINGS,
+        Binding("e", "open_event_history", "Events", show=False),
         Binding("t", "open_root_task", "Root Task", show=False),
     ]
     inspection_title = "Goal Inspect"
@@ -116,14 +121,17 @@ class GoalInspectionScreen(InspectionScreen):
     def render_hint(self) -> str:
         goal = self._get_goal()
         if goal.root_task_id is None:
-            return "t root task unavailable    Escape or Backspace returns to the previous screen."
-        return "t inspect root task    Escape or Backspace returns to the previous screen."
+            return "e inspect event history    t root task unavailable    Escape or Backspace returns to the previous screen."
+        return "e inspect event history    t inspect root task    Escape or Backspace returns to the previous screen."
 
     def action_open_root_task(self) -> None:
         goal = self._get_goal()
         if goal.root_task_id is None:
             return
         self.app.push_screen(TaskInspectionScreen(goal.root_task_id))
+
+    def action_open_event_history(self) -> None:
+        self.app.push_screen(GoalEventHistoryScreen(self.goal_id))
 
     def _get_goal(self) -> GoalDetailRecord:
         return get_goal_for_tui(self.pantheon_app.db_path, self.goal_id)
@@ -197,6 +205,7 @@ class RunInspectionScreen(InspectionScreen):
 
     BINDINGS = [
         *InspectionScreen.BINDINGS,
+        Binding("e", "open_event_history", "Events", show=False),
         Binding("t", "open_task", "Task", show=False),
     ]
     inspection_title = "Run Inspect"
@@ -237,11 +246,97 @@ class RunInspectionScreen(InspectionScreen):
         )
 
     def render_hint(self) -> str:
-        return "t inspect task    Escape or Backspace returns to the previous screen."
+        return "e inspect related event history    t inspect task    Escape or Backspace returns to the previous screen."
 
     def action_open_task(self) -> None:
         run = self._get_run()
         self.app.push_screen(TaskInspectionScreen(run.task_id))
 
+    def action_open_event_history(self) -> None:
+        self.app.push_screen(RunEventHistoryScreen(self.run_id))
+
     def _get_run(self) -> RunInspectionRecord:
         return get_run_for_inspection(self.pantheon_app.db_path, self.run_id)
+
+
+class EventHistoryScreen(InspectionScreen):
+    """Read-only history inspection for a narrow entity context."""
+
+    inspection_title = "Event History"
+    empty_message = "No event history available."
+
+    def render_body(self) -> str:
+        events = self.get_events()
+        lines = [self.header_line()]
+        if not events:
+            lines.extend(["", self.empty_message])
+            return "\n".join(lines)
+
+        for event in events:
+            lines.extend(
+                [
+                    "",
+                    f"{event.created_at}  {event.event_type}",
+                    f"goal_id: {event.goal_id or 'None'}",
+                    f"task_id: {event.task_id or 'None'}",
+                    f"run_id: {event.run_id or 'None'}",
+                    f"agent_id: {event.agent_id or 'None'}",
+                    f"payload: {_format_event_payload(event)}",
+                ]
+            )
+        return "\n".join(lines)
+
+    def render_hint(self) -> str:
+        return "Escape or Backspace returns to the previous screen."
+
+    def header_line(self) -> str:
+        raise NotImplementedError
+
+    def get_events(self) -> list[EventRecord]:
+        raise NotImplementedError
+
+
+class GoalEventHistoryScreen(EventHistoryScreen):
+    """Read-only goal event history screen."""
+
+    inspection_title = "Goal History"
+    empty_message = "No event history recorded for this goal."
+
+    def __init__(self, goal_id: str) -> None:
+        super().__init__()
+        self.goal_id = goal_id
+
+    def header_line(self) -> str:
+        return f"goal_id: {self.goal_id}"
+
+    def get_events(self) -> list[EventRecord]:
+        return get_events_for_goal(self.pantheon_app.db_path, self.goal_id)
+
+
+class RunEventHistoryScreen(EventHistoryScreen):
+    """Read-only run-related event history screen."""
+
+    inspection_title = "Run History"
+    empty_message = "No event history recorded for this run."
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__()
+        self.run_id = run_id
+
+    def header_line(self) -> str:
+        return f"run_id: {self.run_id}"
+
+    def get_events(self) -> list[EventRecord]:
+        return get_events_for_run(self.pantheon_app.db_path, self.run_id)
+
+
+def _format_event_payload(event: EventRecord) -> str:
+    try:
+        payload = json.loads(event.payload_json)
+    except json.JSONDecodeError:
+        return event.payload_json
+
+    if isinstance(payload, dict) and payload:
+        compact = ", ".join(f"{key}={payload[key]!r}" for key in sorted(payload))
+        return compact
+    return event.payload_json

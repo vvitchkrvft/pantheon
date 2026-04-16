@@ -70,6 +70,11 @@ class AgentsScreen(PantheonScreen):
         list_view.index = target_index
         self._sync_selection_from_index(target_index)
 
+    def handle_group_changed(self) -> None:
+        if self.is_mounted:
+            self.selected_agent_id = None
+        super().handle_group_changed()
+
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.list_view.id != "agents-list":
             return

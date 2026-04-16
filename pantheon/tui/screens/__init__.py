@@ -51,6 +51,11 @@ class PantheonScreen(Screen[None]):
     def refresh_screen_data(self) -> None:
         """Reload any read-only data needed by the screen."""
 
+    def handle_group_changed(self) -> None:
+        """Respond to an app-level current-group change."""
+        if self.is_mounted:
+            self.refresh_screen_data()
+
 
 class PlaceholderPanelScreen(PantheonScreen):
     """Shared composition pattern for simple placeholder shells."""

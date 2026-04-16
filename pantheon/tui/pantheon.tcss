@@ -6,6 +6,14 @@ Header {
     dock: top;
 }
 
+#current-group-context {
+    dock: top;
+    height: auto;
+    padding: 0 2;
+    color: $text;
+    background: $boost;
+}
+
 Footer {
     dock: bottom;
 }

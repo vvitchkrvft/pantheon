@@ -75,6 +75,14 @@ def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
     try:
         connection.execute(
             """
+            UPDATE groups
+            SET created_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("2026-04-15T00:00:00Z", "2026-04-15T00:00:00Z", group.id),
+        )
+        connection.execute(
+            """
             UPDATE goals
             SET created_at = ?, updated_at = ?
             WHERE id = ?
@@ -320,6 +328,80 @@ def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
     }
 
 
+def _seed_secondary_group_data(db_path: Path) -> dict[str, str]:
+    bootstrap_database(db_path)
+    group = create_group(db_path, "beta")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-2",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead-2",
+        workdir="/tmp/workdir-lead-2",
+    )
+    goal = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship slice C",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE groups
+            SET created_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("2026-04-15T00:00:10Z", "2026-04-15T00:00:10Z", group.id),
+        )
+        connection.execute(
+            """
+            UPDATE goals
+            SET created_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("2026-04-15T00:00:11Z", "2026-04-15T00:00:11Z", goal.goal.id),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET created_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("2026-04-15T00:00:11Z", "2026-04-15T00:00:11Z", goal.root_task.id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return {
+        "group_id": group.id,
+        "lead_id": lead.id,
+        "goal_id": goal.goal.id,
+        "task_id": goal.root_task.id,
+    }
+
+
+def _seed_empty_group(db_path: Path) -> dict[str, str]:
+    bootstrap_database(db_path)
+    group = create_group(db_path, "gamma")
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE groups
+            SET created_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("2026-04-15T00:00:20Z", "2026-04-15T00:00:20Z", group.id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return {"group_id": group.id}
+
+
 def test_app_launches_into_overview_screen(tmp_path: Path) -> None:
     async def run_test() -> None:
         app = PantheonApp(tmp_path / "pantheon.db")
@@ -474,5 +556,103 @@ def test_runs_selection_updates_detail_panel(tmp_path: Path) -> None:
             await pilot.pause()
             assert app.screen.selected_run_id == ids["run_two_id"]
             assert "task: Ship slice B" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_keyboard_group_switch_updates_current_group_context(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    alpha = _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            context = app.query_one("#current-group-context", Static)
+            assert app.current_group_id == alpha["group_id"]
+            assert "Current Group: alpha (1/2)" in str(context.content)
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.current_group_id == beta["group_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+            await pilot.press("[")
+            await pilot.pause()
+            assert app.current_group_id == alpha["group_id"]
+            assert "Current Group: alpha (1/2)" in str(context.content)
+
+    asyncio.run(run_test())
+
+
+def test_active_screen_refreshes_after_group_switch(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("3")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalsScreen)
+            detail = app.screen.query_one("#goals-detail", Static)
+            assert "title: Ship slice A" in str(detail.content)
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.current_group_id == beta["group_id"]
+            assert app.screen.selected_goal_id == beta["goal_id"]
+            assert "title: Ship slice C" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_group_switch_revalidates_screen_selection(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    alpha = _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            assert isinstance(app.screen, AgentsScreen)
+            detail = app.screen.query_one("#agents-detail", Static)
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.screen.selected_agent_id == alpha["worker_id"]
+            assert "name: worker-1" in str(detail.content)
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.current_group_id == beta["group_id"]
+            assert app.screen.selected_agent_id == beta["lead_id"]
+            assert "name: lead-2" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_group_switch_empty_state_is_explicit_for_chosen_group(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    _seed_empty_group(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("4")
+            await pilot.pause()
+            assert isinstance(app.screen, TasksScreen)
+            detail = app.screen.query_one("#tasks-detail", Static)
+            assert app.screen.selected_task_id is not None
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.screen.selected_task_id is None
+            assert "No tasks found in the current group." in str(detail.content)
 
     asyncio.run(run_test())

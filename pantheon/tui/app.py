@@ -7,9 +7,9 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.reactive import reactive
-from textual.widgets import Footer, Header
+from textual.widgets import Footer, Header, Static
 
-from pantheon.db import PathLike, bootstrap_database, resolve_current_group_id
+from pantheon.db import GroupRecord, PathLike, bootstrap_database, list_groups, resolve_current_group_id
 from pantheon.tui.screens.agents import AgentsScreen
 from pantheon.tui.screens.goals import GoalsScreen
 from pantheon.tui.screens.overview import OverviewScreen
@@ -40,6 +40,8 @@ class PantheonApp(App[None]):
         Binding("4", "go_to_screen('tasks')", "Tasks"),
         Binding("5", "go_to_screen('runs')", "Runs"),
         Binding("6", "go_to_screen('settings')", "Settings"),
+        Binding("[", "previous_group", "Prev Group"),
+        Binding("]", "next_group", "Next Group"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -49,27 +51,86 @@ class PantheonApp(App[None]):
     def __init__(self, db_path: PathLike = Path("pantheon.db")) -> None:
         self.db_path = Path(db_path)
         bootstrap_database(self.db_path)
+        self._groups: list[GroupRecord] = []
+        self._screens = {
+            "overview": OverviewScreen(),
+            "agents": AgentsScreen(),
+            "goals": GoalsScreen(),
+            "tasks": TasksScreen(),
+            "runs": RunsScreen(),
+            "settings": SettingsScreen(),
+        }
         super().__init__()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
+        yield Static(id="current-group-context")
         yield Footer()
 
     def on_mount(self) -> None:
+        self._reload_groups()
         self.current_group_id = resolve_current_group_id(self.db_path)
-        self.install_screen(OverviewScreen(), name="overview")
-        self.install_screen(AgentsScreen(), name="agents")
-        self.install_screen(GoalsScreen(), name="goals")
-        self.install_screen(TasksScreen(), name="tasks")
-        self.install_screen(RunsScreen(), name="runs")
-        self.install_screen(SettingsScreen(), name="settings")
+        for name, screen in self._screens.items():
+            self.install_screen(screen, name=name)
         self.push_screen("overview")
         self.current_screen_name = "overview"
-        self.sub_title = "Overview"
+        self._update_shell_context()
 
     def action_go_to_screen(self, screen_name: str) -> None:
         if screen_name not in dict(SCREEN_ORDER):
             return
         self.switch_screen(screen_name)
         self.current_screen_name = screen_name
-        self.sub_title = dict(SCREEN_ORDER)[screen_name]
+        self._update_shell_context()
+
+    def action_previous_group(self) -> None:
+        self._cycle_group(-1)
+
+    def action_next_group(self) -> None:
+        self._cycle_group(1)
+
+    def watch_current_group_id(self, old_value: str | None, new_value: str | None) -> None:
+        if old_value == new_value:
+            return
+        self._update_shell_context()
+        for screen in self._screens.values():
+            screen.handle_group_changed()
+
+    def _reload_groups(self) -> None:
+        self._groups = list_groups(self.db_path)
+
+    def _cycle_group(self, direction: int) -> None:
+        self._reload_groups()
+        if not self._groups:
+            self.current_group_id = None
+            return
+
+        current_index = 0
+        if self.current_group_id is not None:
+            current_index = next(
+                (index for index, group in enumerate(self._groups) if group.id == self.current_group_id),
+                0,
+            )
+
+        target_index = (current_index + direction) % len(self._groups)
+        self.current_group_id = self._groups[target_index].id
+
+    def _update_shell_context(self) -> None:
+        screen_title = dict(SCREEN_ORDER).get(self.current_screen_name, "Overview")
+        group_label = self._current_group_label()
+        self.sub_title = f"{screen_title} | {group_label}"
+        if self.is_mounted:
+            self.query_one("#current-group-context", Static).update(
+                f"Current Group: {group_label}    [ / ] switch groups"
+            )
+
+    def _current_group_label(self) -> str:
+        self._reload_groups()
+        if not self._groups or self.current_group_id is None:
+            return "none"
+
+        for index, group in enumerate(self._groups, start=1):
+            if group.id == self.current_group_id:
+                return f"{group.name} ({index}/{len(self._groups)})"
+
+        return "none"

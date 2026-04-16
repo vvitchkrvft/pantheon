@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "0kvlt Research" }]
 license = { text = "MIT" }
-dependencies = []
+dependencies = [
+    "textual==8.2.3",
+]
 
 [dependency-groups]
 dev = [

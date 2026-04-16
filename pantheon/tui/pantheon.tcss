@@ -1,0 +1,47 @@
+Screen {
+    layout: vertical;
+}
+
+Header {
+    dock: top;
+}
+
+Footer {
+    dock: bottom;
+}
+
+.panel {
+    border: round $primary;
+    height: 1fr;
+    padding: 1 2;
+    width: 1fr;
+}
+
+#overview-layout {
+    grid-size: 3 3;
+    grid-columns: 1fr 1fr 1fr;
+    grid-rows: auto 1fr auto;
+    height: 1fr;
+    padding: 1;
+}
+
+#overview-primary-readout {
+    column-span: 3;
+}
+
+#overview-recent-activity {
+    column-span: 3;
+}
+
+#settings-layout {
+    grid-size: 2 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: 1fr 1fr;
+    height: 1fr;
+    padding: 1;
+}
+
+.two-panel-layout {
+    height: 1fr;
+    padding: 1;
+}

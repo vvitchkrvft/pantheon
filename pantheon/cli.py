@@ -21,6 +21,7 @@ from pantheon.db import (
     submit_goal,
 )
 from pantheon.runner import start_goal_execution
+from pantheon.tui import PantheonApp
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -108,9 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "inspect":
         return _handle_inspect_command(args)
 
-    print(
-        "Pantheon scaffold initialized. Read spec/PANTHEON_DOCTRINE.md and spec/PANTHEON_V1_BRIEF.md."
-    )
+    PantheonApp(args.db).run()
     return 0
 
 

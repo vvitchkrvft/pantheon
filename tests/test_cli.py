@@ -3,6 +3,7 @@ import subprocess
 from os import environ
 from pathlib import Path
 
+import pantheon.cli
 from pantheon.db import bootstrap_database, create_agent, create_group, submit_goal
 
 
@@ -101,6 +102,20 @@ def test_group_list_prints_groups_in_stable_order(tmp_path: Path) -> None:
     assert beta_columns[3] == "2026-04-15T00:00:00Z"
     assert len(alpha_columns) == 4
     assert len(beta_columns) == 4
+
+
+def test_default_cli_launches_tui(monkeypatch, tmp_path: Path) -> None:
+    calls: list[Path] = []
+
+    def fake_run(self) -> None:
+        calls.append(self.db_path)
+
+    monkeypatch.setattr(pantheon.cli.PantheonApp, "run", fake_run)
+
+    result = pantheon.cli.main(["--db", str(tmp_path / "pantheon.db")])
+
+    assert result == 0
+    assert calls == [tmp_path / "pantheon.db"]
 
 
 def test_agent_add_creates_agent(tmp_path: Path) -> None:

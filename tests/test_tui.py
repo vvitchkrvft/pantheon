@@ -43,8 +43,16 @@ SCREEN_BINDINGS = (
 )
 
 
+def _write_run_log(logs_dir: Path, name: str, content: str) -> str:
+    path = logs_dir / name
+    path.write_text(content, encoding="utf-8")
+    return str(path)
+
+
 def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
     bootstrap_database(db_path)
+    logs_dir = db_path.parent / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
     group = create_group(db_path, "alpha")
     lead = create_agent(
         db_path,
@@ -222,7 +230,11 @@ def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
                 None,
                 0,
                 None,
-                "/tmp/run-1.log",
+                _write_run_log(
+                    logs_dir,
+                    "run-1.log",
+                    "run-1 line 1\nrun-1 line 2\nrun-1 line 3\n",
+                ),
                 None,
                 "2026-04-15T00:00:01Z",
                 "2026-04-15T00:00:03Z",
@@ -259,7 +271,11 @@ def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
                 None,
                 1,
                 "adapter failed",
-                "/tmp/run-2.log",
+                _write_run_log(
+                    logs_dir,
+                    "run-2.log",
+                    "run-2 error line 1\nrun-2 error line 2\n",
+                ),
                 None,
                 "2026-04-15T00:00:02Z",
                 "2026-04-15T00:00:04Z",
@@ -296,7 +312,11 @@ def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
                 None,
                 None,
                 None,
-                "/tmp/run-3.log",
+                _write_run_log(
+                    logs_dir,
+                    "run-3.log",
+                    "run-3 active line 1\nrun-3 active line 2\n",
+                ),
                 None,
                 "2026-04-15T00:00:03Z",
                 None,
@@ -485,6 +505,102 @@ def _seed_goal_without_root_task(db_path: Path) -> dict[str, str]:
     return {"group_id": group.id, "goal_id": goal.goal.id}
 
 
+def _seed_run_log_preview_state(
+    db_path: Path,
+    *,
+    log_content: str | None,
+    log_filename: str = "preview.log",
+) -> dict[str, str]:
+    bootstrap_database(db_path)
+    logs_dir = db_path.parent / "preview-logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    group = create_group(db_path, "preview-group")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-preview",
+        role="lead",
+        hermes_home="/tmp/hermes-home-preview",
+        workdir="/tmp/workdir-preview",
+    )
+    goal = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Preview goal",
+    )
+
+    log_path = logs_dir / log_filename
+    if log_content is not None:
+        log_path.write_text(log_content, encoding="utf-8")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE goals
+            SET status = ?, started_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("running", "2026-04-16T00:00:01Z", "2026-04-16T00:00:01Z", goal.goal.id),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = ?, created_at = ?, started_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("running", "2026-04-16T00:00:01Z", "2026-04-16T00:00:01Z", "2026-04-16T00:00:01Z", goal.root_task.id),
+        )
+        connection.execute(
+            """
+            INSERT INTO runs (
+                id,
+                task_id,
+                agent_id,
+                attempt_number,
+                status,
+                session_id,
+                pid,
+                exit_code,
+                error_text,
+                log_path,
+                usage_json,
+                started_at,
+                finished_at,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-preview",
+                goal.root_task.id,
+                lead.id,
+                1,
+                "running",
+                "sess-preview",
+                None,
+                None,
+                None,
+                str(log_path),
+                None,
+                "2026-04-16T00:00:01Z",
+                None,
+                "2026-04-16T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return {
+        "group_id": group.id,
+        "goal_id": goal.goal.id,
+        "task_id": goal.root_task.id,
+        "run_id": "run-preview",
+        "log_path": str(log_path),
+    }
+
+
 def test_app_launches_into_overview_screen(tmp_path: Path) -> None:
     async def run_test() -> None:
         app = PantheonApp(tmp_path / "pantheon.db")
@@ -634,13 +750,86 @@ def test_runs_selection_updates_detail_panel(tmp_path: Path) -> None:
             detail = app.screen.query_one("#runs-detail", Static)
             assert app.screen.selected_run_id == ids["run_one_id"]
             assert "task: Ship slice A" in str(detail.content)
+            assert "log_preview: full preview" in str(detail.content)
+            assert "run-1 line 3" in str(detail.content)
 
             await pilot.press("down")
             await pilot.pause()
             assert app.screen.selected_run_id == ids["run_two_id"]
             assert "task: Ship slice B" in str(detail.content)
+            assert "run-2 error line 2" in str(detail.content)
 
     asyncio.run(run_test())
+
+
+def test_runs_detail_panel_shows_real_log_preview(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_run_log_preview_state(
+        db_path,
+        log_content="alpha\nbeta\ngamma\n",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("5")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RunsScreen)
+            detail = app.screen.query_one("#runs-detail", Static)
+            assert app.screen.selected_run_id == ids["run_id"]
+            assert "log_preview: full preview" in str(detail.content)
+            assert "alpha\nbeta\ngamma" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_runs_detail_panel_handles_missing_empty_and_clipped_logs(tmp_path: Path) -> None:
+    missing_db_path = tmp_path / "missing.db"
+    empty_db_path = tmp_path / "empty.db"
+    clipped_db_path = tmp_path / "clipped.db"
+
+    _seed_run_log_preview_state(missing_db_path, log_content=None, log_filename="missing.log")
+    _seed_run_log_preview_state(empty_db_path, log_content="", log_filename="empty.log")
+    _seed_run_log_preview_state(
+        clipped_db_path,
+        log_content="".join(f"line {index:03d}\n" for index in range(1, 61)),
+        log_filename="clipped.log",
+    )
+
+    async def run_missing_test() -> None:
+        app = PantheonApp(missing_db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("5")
+            await pilot.pause()
+            detail = app.screen.query_one("#runs-detail", Static)
+            assert "log_preview: missing" in str(detail.content)
+            assert "file not found" in str(detail.content)
+
+    async def run_empty_test() -> None:
+        app = PantheonApp(empty_db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("5")
+            await pilot.pause()
+            detail = app.screen.query_one("#runs-detail", Static)
+            assert "log_preview: empty" in str(detail.content)
+            assert "log file is empty" in str(detail.content)
+
+    async def run_clipped_test() -> None:
+        app = PantheonApp(clipped_db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("5")
+            await pilot.pause()
+            detail = app.screen.query_one("#runs-detail", Static)
+            content = str(detail.content)
+            assert "log_preview: tail preview" in content
+            assert "line 060" in content
+            assert "line 021" in content
+            assert "line 020" not in content
+
+    asyncio.run(run_missing_test())
+    asyncio.run(run_empty_test())
+    asyncio.run(run_clipped_test())
 
 
 def test_keyboard_group_switch_updates_current_group_context(tmp_path: Path) -> None:
@@ -933,11 +1122,35 @@ def test_run_drill_in_opens_focused_inspection_and_returns_to_runs(tmp_path: Pat
             assert "entity_type: run" in str(body.content)
             assert f"id: {ids['run_two_id']}" in str(body.content)
             assert "task: Ship slice B" in str(body.content)
+            assert "log_preview: full preview" in str(body.content)
+            assert "run-2 error line 2" in str(body.content)
 
             await pilot.press("escape")
             await pilot.pause()
             assert isinstance(app.screen, RunsScreen)
             assert app.screen.selected_run_id == ids["run_two_id"]
+
+    asyncio.run(run_test())
+
+
+def test_run_inspection_shows_real_log_preview(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_run_log_preview_state(
+        db_path,
+        log_content="inspect line 1\ninspect line 2\n",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("5", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RunInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"id: {ids['run_id']}" in str(body.content)
+            assert "log_preview: full preview" in str(body.content)
+            assert "inspect line 2" in str(body.content)
 
     asyncio.run(run_test())
 

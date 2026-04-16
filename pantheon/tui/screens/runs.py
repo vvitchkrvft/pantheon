@@ -129,6 +129,8 @@ def _format_run_detail(run: RunDetailRecord) -> str:
             f"exit_code: {exit_code}",
             f"error_text: {error_text}",
             f"log_path: {run.log_path}",
+            f"log_preview: {run.log_preview_label}",
+            run.log_preview_text,
             f"started_at: {started_at}",
             f"finished_at: {finished_at}",
         ]

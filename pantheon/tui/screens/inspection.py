@@ -10,7 +10,14 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Static
 
-from pantheon.db import GoalDetailRecord, RunDetailRecord, TaskDetailRecord, get_goal_for_tui, get_run_for_tui, get_task_for_tui
+from pantheon.db import (
+    GoalDetailRecord,
+    RunInspectionRecord,
+    TaskDetailRecord,
+    get_goal_for_tui,
+    get_run_for_inspection,
+    get_task_for_tui,
+)
 from pantheon.tui.screens import panel_widget
 
 if TYPE_CHECKING:
@@ -220,6 +227,8 @@ class RunInspectionScreen(InspectionScreen):
                 f"exit_code: {exit_code}",
                 f"error_text: {error_text}",
                 f"log_path: {run.log_path}",
+                f"log_preview: {run.log_preview_label}",
+                run.log_preview_text,
                 f"created_at: {run.created_at}",
                 f"started_at: {started_at}",
                 f"finished_at: {finished_at}",
@@ -234,5 +243,5 @@ class RunInspectionScreen(InspectionScreen):
         run = self._get_run()
         self.app.push_screen(TaskInspectionScreen(run.task_id))
 
-    def _get_run(self) -> RunDetailRecord:
-        return get_run_for_tui(self.pantheon_app.db_path, self.run_id)
+    def _get_run(self) -> RunInspectionRecord:
+        return get_run_for_inspection(self.pantheon_app.db_path, self.run_id)

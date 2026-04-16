@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 PathLike = str | Path
+RUN_LOG_PREVIEW_MAX_LINES = 40
+RUN_LOG_PREVIEW_MAX_CHARS = 4000
 
 SCHEMA_STATEMENTS = (
     """
@@ -348,6 +351,8 @@ class RunDetailRecord:
     task_title: str
     agent_name: str
     goal_title: str
+    log_preview_label: str
+    log_preview_text: str
 
 
 @dataclass(frozen=True)
@@ -451,6 +456,11 @@ class RunInspectionRecord:
     started_at: str | None
     finished_at: str | None
     created_at: str
+    task_title: str
+    agent_name: str
+    goal_title: str
+    log_preview_label: str
+    log_preview_text: str
 
 
 def bootstrap_database(db_path: PathLike) -> None:
@@ -484,6 +494,43 @@ def connect_readonly_database(db_path: PathLike) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def _build_run_log_preview(log_path: PathLike) -> tuple[str, str]:
+    path = Path(log_path)
+    if not path.exists():
+        return ("missing", f"Log preview unavailable: file not found at {path}")
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if text == "":
+        return ("empty", "Log preview unavailable: log file is empty.")
+
+    lines = text.splitlines()
+    if not lines:
+        return ("empty", "Log preview unavailable: log file is empty.")
+
+    tail_lines: deque[str] = deque()
+    char_count = 0
+    for line in reversed(lines):
+        separator_width = 1 if tail_lines else 0
+        line_width = len(line)
+        if tail_lines and (len(tail_lines) >= RUN_LOG_PREVIEW_MAX_LINES or char_count + separator_width + line_width > RUN_LOG_PREVIEW_MAX_CHARS):
+            break
+        if not tail_lines and line_width > RUN_LOG_PREVIEW_MAX_CHARS:
+            tail_lines.appendleft(line[-RUN_LOG_PREVIEW_MAX_CHARS :])
+            char_count = len(tail_lines[0])
+            break
+        tail_lines.appendleft(line)
+        char_count += separator_width + line_width
+
+    preview_text = "\n".join(tail_lines)
+    clipped = len(tail_lines) < len(lines) or len(preview_text) < len(text.rstrip("\n"))
+    if clipped:
+        return (
+            f"tail preview (last {RUN_LOG_PREVIEW_MAX_LINES} lines / {RUN_LOG_PREVIEW_MAX_CHARS} chars max)",
+            preview_text,
+        )
+    return ("full preview", preview_text)
 
 
 def create_group(db_path: PathLike, name: str) -> GroupRecord:
@@ -927,13 +974,13 @@ def get_run_for_tui(db_path: PathLike, run_id: str) -> RunDetailRecord:
                 runs.started_at,
                 runs.finished_at,
                 runs.created_at,
-                tasks.title AS task_title,
-                agents.name AS agent_name,
-                goals.title AS goal_title
+                COALESCE(tasks.title, runs.task_id) AS task_title,
+                COALESCE(agents.name, runs.agent_id) AS agent_name,
+                COALESCE(goals.title, tasks.goal_id, 'unknown goal') AS goal_title
             FROM runs
-            JOIN tasks ON tasks.id = runs.task_id
-            JOIN goals ON goals.id = tasks.goal_id
-            JOIN agents ON agents.id = runs.agent_id
+            LEFT JOIN tasks ON tasks.id = runs.task_id
+            LEFT JOIN goals ON goals.id = tasks.goal_id
+            LEFT JOIN agents ON agents.id = runs.agent_id
             WHERE runs.id = ?
             """,
             (normalized_run_id,),
@@ -946,7 +993,12 @@ def get_run_for_tui(db_path: PathLike, run_id: str) -> RunDetailRecord:
     if row is None:
         raise ValueError("run not found")
 
-    return RunDetailRecord(**dict(row))
+    log_preview_label, log_preview_text = _build_run_log_preview(row["log_path"])
+    return RunDetailRecord(
+        **dict(row),
+        log_preview_label=log_preview_label,
+        log_preview_text=log_preview_text,
+    )
 
 
 def get_recent_events_for_group(
@@ -1362,22 +1414,28 @@ def get_run_for_inspection(db_path: PathLike, run_id: str) -> RunInspectionRecor
         row = connection.execute(
             """
             SELECT
-                id,
-                task_id,
-                agent_id,
-                attempt_number,
-                status,
-                session_id,
-                pid,
-                exit_code,
-                error_text,
-                log_path,
-                usage_json,
-                started_at,
-                finished_at,
-                created_at
+                runs.id,
+                runs.task_id,
+                runs.agent_id,
+                runs.attempt_number,
+                runs.status,
+                runs.session_id,
+                runs.pid,
+                runs.exit_code,
+                runs.error_text,
+                runs.log_path,
+                runs.usage_json,
+                runs.started_at,
+                runs.finished_at,
+                runs.created_at,
+                COALESCE(tasks.title, runs.task_id) AS task_title,
+                COALESCE(agents.name, runs.agent_id) AS agent_name,
+                COALESCE(goals.title, tasks.goal_id, 'unknown goal') AS goal_title
             FROM runs
-            WHERE id = ?
+            LEFT JOIN tasks ON tasks.id = runs.task_id
+            LEFT JOIN goals ON goals.id = tasks.goal_id
+            LEFT JOIN agents ON agents.id = runs.agent_id
+            WHERE runs.id = ?
             """,
             (normalized_run_id,),
         ).fetchone()
@@ -1389,7 +1447,12 @@ def get_run_for_inspection(db_path: PathLike, run_id: str) -> RunInspectionRecor
     if row is None:
         raise ValueError("run not found")
 
-    return RunInspectionRecord(**dict(row))
+    log_preview_label, log_preview_text = _build_run_log_preview(row["log_path"])
+    return RunInspectionRecord(
+        **dict(row),
+        log_preview_label=log_preview_label,
+        log_preview_text=log_preview_text,
+    )
 
 
 def cancel_goal(db_path: PathLike, goal_id: str) -> CancelGoalResult:

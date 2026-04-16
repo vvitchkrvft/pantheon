@@ -1,10 +1,13 @@
 import asyncio
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
 from textual.widgets import Input, ListView, Static
 
-from pantheon.db import bootstrap_database, create_agent, create_group, submit_goal
+from pantheon.adapters import AdapterRun, FinalResult, HermesAdapter, StreamEvent
+from pantheon.db import PathLike, bootstrap_database, create_agent, create_group, submit_goal
+from pantheon.runner import StartGoalResult, start_goal_execution
 from pantheon.tui import PantheonApp
 from pantheon.tui.screens.agents import AgentsScreen
 from pantheon.tui.screens.goal_submit import GoalSubmitScreen
@@ -49,6 +52,45 @@ SCREEN_BINDINGS = (
         ),
     ),
 )
+
+
+class _FakeHermesAdapter(HermesAdapter):
+    def __init__(
+        self,
+        *,
+        status: str = "complete",
+        final_text: str = "adapter success",
+        session_id: str | None = "sess-test",
+        exit_code: int | None = 0,
+        error_text: str | None = None,
+        stream_text: str = "adapter success\n",
+    ) -> None:
+        self._status = status
+        self._final_text = final_text
+        self._session_id = session_id
+        self._exit_code = exit_code
+        self._error_text = error_text
+        self._stream_text = stream_text
+
+    def run_task(self, agent, task, run_context) -> AdapterRun:
+        del agent, task, run_context
+        return AdapterRun(
+            stream_events=[StreamEvent(category="stdout", payload={"text": self._stream_text})],
+            final_result=FinalResult(
+                status=self._status,
+                final_text=self._final_text,
+                session_id=self._session_id,
+                exit_code=self._exit_code,
+                error_text=self._error_text,
+                usage_json=None,
+            ),
+        )
+
+
+def _make_goal_starter(
+    adapter: HermesAdapter,
+) -> Callable[[PathLike, str], StartGoalResult]:
+    return lambda db_path, goal_id: start_goal_execution(db_path, goal_id, adapter=adapter)
 
 
 def _write_run_log(logs_dir: Path, name: str, content: str) -> str:
@@ -783,6 +825,231 @@ def test_goals_selection_updates_detail_panel(tmp_path: Path) -> None:
             await pilot.pause()
             assert app.screen.selected_goal_id == ids["goal_two_id"]
             assert "title: Ship slice B" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_goals_screen_starts_selected_queued_goal(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    group = create_group(db_path, "alpha")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead",
+        workdir="/tmp/workdir-lead",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship queued slice",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(
+            db_path,
+            goal_starter=_make_goal_starter(_FakeHermesAdapter()),
+        )
+        async with app.run_test() as pilot:
+            await pilot.press("3")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalsScreen)
+            detail = app.screen.query_one("#goals-detail", Static)
+            status = app.screen.query_one("#goals-status", Static)
+            assert "start_action: available (press s)" in str(detail.content)
+
+            await pilot.press("s")
+            await pilot.pause()
+
+            assert "Started goal" in str(status.content)
+            assert "status: running" in str(detail.content)
+            assert "start_action: unavailable (goal is not startable from state running)" in str(
+                detail.content
+            )
+
+        connection = sqlite3.connect(db_path)
+        try:
+            goal_row = connection.execute(
+                "SELECT status, started_at FROM goals WHERE id = ?",
+                (submission.goal.id,),
+            ).fetchone()
+            task_row = connection.execute(
+                "SELECT status, result_text FROM tasks WHERE id = ?",
+                (submission.root_task.id,),
+            ).fetchone()
+            run_count = connection.execute(
+                "SELECT COUNT(*) FROM runs WHERE task_id = ?",
+                (submission.root_task.id,),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        assert goal_row is not None
+        assert goal_row[0] == "running"
+        assert goal_row[1] is not None
+        assert task_row == ("complete", "adapter success")
+        assert run_count == (1,)
+
+    asyncio.run(run_test())
+
+
+def test_goal_start_refreshes_overview_tasks_and_runs(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    group = create_group(db_path, "alpha")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead",
+        workdir="/tmp/workdir-lead",
+    )
+    submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Refresh after start",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(
+            db_path,
+            goal_starter=_make_goal_starter(
+                _FakeHermesAdapter(final_text="refresh success", session_id="sess-refresh")
+            ),
+        )
+        async with app.run_test() as pilot:
+            await pilot.press("3", "s")
+            await pilot.pause()
+
+            await pilot.press("1")
+            await pilot.pause()
+            primary = app.screen.query_one("#overview-primary-readout", Static)
+            content = str(primary.content)
+            assert "goals: 1 active=1" in content
+            assert "tasks: 1 active=0" in content
+            assert "runs: 1 active=0" in content
+
+            await pilot.press("4")
+            await pilot.pause()
+            assert isinstance(app.screen, TasksScreen)
+            task_detail = app.screen.query_one("#tasks-detail", Static)
+            assert "title: Refresh after start" in str(task_detail.content)
+            assert "status: complete" in str(task_detail.content)
+            assert "result_text: refresh success" in str(task_detail.content)
+
+            await pilot.press("5")
+            await pilot.pause()
+            assert isinstance(app.screen, RunsScreen)
+            run_detail = app.screen.query_one("#runs-detail", Static)
+            assert "status: complete" in str(run_detail.content)
+            assert "session_id: sess-refresh" in str(run_detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_goal_start_rejects_selected_goal_that_is_not_startable(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("3")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalsScreen)
+            detail = app.screen.query_one("#goals-detail", Static)
+            status = app.screen.query_one("#goals-status", Static)
+            assert app.screen.selected_goal_id == ids["goal_one_id"]
+            assert "status: running" in str(detail.content)
+
+            await pilot.press("s")
+            await pilot.pause()
+
+            assert "Error: goal is not startable from state running" in str(status.content)
+            assert app.screen.selected_goal_id == ids["goal_one_id"]
+
+        connection = sqlite3.connect(db_path)
+        try:
+            run_count = connection.execute("SELECT COUNT(*) FROM runs").fetchone()
+        finally:
+            connection.close()
+
+        assert run_count == (3,)
+
+    asyncio.run(run_test())
+
+
+def test_goal_start_displays_backend_failure(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    group = create_group(db_path, "alpha")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead",
+        workdir="/tmp/workdir-lead",
+    )
+    submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Backend failure goal",
+    )
+
+    def failing_goal_starter(db_path: PathLike, goal_id: str) -> StartGoalResult:
+        del db_path, goal_id
+        raise ValueError("runner exploded")
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path, goal_starter=failing_goal_starter)
+        async with app.run_test() as pilot:
+            await pilot.press("3", "s")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalsScreen)
+            status = app.screen.query_one("#goals-status", Static)
+            detail = app.screen.query_one("#goals-detail", Static)
+            assert "Error: runner exploded" in str(status.content)
+            assert "status: queued" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_goal_start_preserves_current_group_context(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(
+            db_path,
+            goal_starter=_make_goal_starter(_FakeHermesAdapter(final_text="beta success")),
+        )
+        async with app.run_test() as pilot:
+            context = app.query_one("#current-group-context", Static)
+
+            await pilot.press("3")
+            await pilot.pause()
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.current_group_id == beta["group_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
+            assert isinstance(app.screen, GoalsScreen)
+            assert app.screen.selected_goal_id == beta["goal_id"]
+
+            await pilot.press("s")
+            await pilot.pause()
+
+            detail = app.screen.query_one("#goals-detail", Static)
+            status = app.screen.query_one("#goals-status", Static)
+            assert app.current_group_id == beta["group_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
+            assert "Started goal" in str(status.content)
+            assert "title: Ship slice C" in str(detail.content)
+            assert "status: running" in str(detail.content)
 
     asyncio.run(run_test())
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -14,9 +15,12 @@ from pantheon.db import (
     GroupRecord,
     PathLike,
     bootstrap_database,
+    get_goal_for_tui,
+    get_latest_run_id_for_task,
     list_groups,
     resolve_current_group_id,
 )
+from pantheon.runner import StartGoalResult, start_goal_execution
 from pantheon.tui.screens.agents import AgentsScreen
 from pantheon.tui.screens.goal_submit import GoalSubmitScreen
 from pantheon.tui.screens.goals import GoalsScreen
@@ -59,9 +63,15 @@ class PantheonApp(App[None]):
     current_group_id: reactive[str | None] = reactive(None)
     current_screen_name: reactive[str] = reactive("overview")
 
-    def __init__(self, db_path: PathLike = Path("pantheon.db")) -> None:
+    def __init__(
+        self,
+        db_path: PathLike = Path("pantheon.db"),
+        *,
+        goal_starter: Callable[[PathLike, str], StartGoalResult] | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         bootstrap_database(self.db_path)
+        self._goal_starter = goal_starter or start_goal_execution
         self._groups: list[GroupRecord] = []
         self._screens = {
             "overview": OverviewScreen(),
@@ -180,6 +190,11 @@ class PantheonApp(App[None]):
             if screen.is_mounted:
                 screen.refresh_screen_data()
 
+    def start_goal(self, goal_id: str) -> StartGoalResult:
+        result = self._goal_starter(self.db_path, goal_id)
+        self._refresh_tui_state_after_goal_start(goal_id)
+        return result
+
     def current_group_label(self) -> str:
         return self._current_group_label()
 
@@ -195,6 +210,36 @@ class PantheonApp(App[None]):
     def _dismiss_drill_in_stack(self) -> None:
         while len(self._screen_stack) > 1 and self.screen not in self._screens.values():
             self.pop_screen()
+
+    def _refresh_tui_state_after_goal_start(self, goal_id: str) -> None:
+        goal = get_goal_for_tui(self.db_path, goal_id)
+        goals_screen = self._screens["goals"]
+        tasks_screen = self._screens["tasks"]
+        runs_screen = self._screens["runs"]
+
+        if isinstance(goals_screen, GoalsScreen):
+            self._set_screen_selection(goals_screen, "selected_goal_id", goal_id)
+        if isinstance(tasks_screen, TasksScreen):
+            self._set_screen_selection(tasks_screen, "selected_task_id", goal.root_task_id)
+        if isinstance(runs_screen, RunsScreen):
+            self._set_screen_selection(
+                runs_screen,
+                "selected_run_id",
+                get_latest_run_id_for_task(self.db_path, goal.root_task_id)
+                if goal.root_task_id is not None
+                else None,
+            )
+
+        for screen in self._screens.values():
+            if screen.is_mounted:
+                screen.refresh_screen_data()
+
+    @staticmethod
+    def _set_screen_selection(screen, attribute_name: str, value: str | None) -> None:
+        if screen.is_mounted:
+            setattr(screen, attribute_name, value)
+            return
+        screen.__dict__[attribute_name] = value
 
     def _current_group_label(self) -> str:
         self._reload_groups()

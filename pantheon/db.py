@@ -287,6 +287,13 @@ class GoalDetailRecord:
 
 
 @dataclass(frozen=True)
+class GoalStartabilityRecord:
+    goal_id: str
+    is_startable: bool
+    reason: str
+
+
+@dataclass(frozen=True)
 class TaskListItemRecord:
     id: str
     goal_id: str
@@ -833,6 +840,51 @@ def get_goal_for_tui(db_path: PathLike, goal_id: str) -> GoalDetailRecord:
         raise ValueError("goal not found")
 
     return GoalDetailRecord(**dict(row))
+
+
+def get_goal_startability_for_tui(
+    db_path: PathLike, goal_id: str
+) -> GoalStartabilityRecord:
+    normalized_goal_id = goal_id.strip()
+    if not normalized_goal_id:
+        raise ValueError("goal id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT status
+            FROM goals
+            WHERE id = ?
+            """,
+            (normalized_goal_id,),
+        ).fetchone()
+        if goal_row is None:
+            raise ValueError("goal not found")
+        if goal_row["status"] != "queued":
+            return GoalStartabilityRecord(
+                goal_id=normalized_goal_id,
+                is_startable=False,
+                reason=f"goal is not startable from state {goal_row['status']}",
+            )
+        try:
+            resolve_goal_for_start(connection, normalized_goal_id)
+        except ValueError as exc:
+            return GoalStartabilityRecord(
+                goal_id=normalized_goal_id,
+                is_startable=False,
+                reason=str(exc),
+            )
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    return GoalStartabilityRecord(
+        goal_id=normalized_goal_id,
+        is_startable=True,
+        reason="queued goal is ready to start",
+    )
 
 
 def list_tasks_for_group(db_path: PathLike, group_id: str) -> list[TaskListItemRecord]:

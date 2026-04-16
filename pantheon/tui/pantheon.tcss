@@ -114,6 +114,11 @@ Footer {
     padding: 1;
 }
 
+#goals-status {
+    height: auto;
+    padding: 0 2 1 2;
+}
+
 .inspection-layout {
     height: 1fr;
     padding: 1;

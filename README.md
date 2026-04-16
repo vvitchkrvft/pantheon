@@ -13,6 +13,7 @@ Current phase:
 - control-plane persistence, dispatch, and status inspection are working against a real Hermes adapter path
 - ACP is now the primary adapter transport, with Hermes CLI query mode retained as fallback when ACP is unusable before prompt dispatch
 - structured lead control payloads and goal completion from lead judgments are now implemented in the control plane
+- explicit operator cancel and retry controls are now implemented for the current CLI surface
 
 The binding product contract lives in `spec/`.
 
@@ -44,6 +45,8 @@ The current CLI supports:
 - `pantheon status <goal-id>`
 - `pantheon inspect task <task-id>`
 - `pantheon inspect run <run-id>`
+- `pantheon retry task <task-id>`
+- `pantheon cancel goal <goal-id>`
 
 The repo also includes:
 - SQLite bootstrap for the V1 core tables
@@ -55,6 +58,7 @@ The repo also includes:
 - ACP-native event/result enrichment with normalized stdout, stderr, lifecycle, and structured output events
 - structured lead-output handling for `task_proposal` and `completion_judgment`
 - same-pass dispatch of newly-ready child tasks when their parent completes
+- explicit goal cancel and task retry controls with preserved run-attempt history
 - run-row inspection in `pantheon status <goal-id>`
 
 ## Not Built Yet
@@ -63,7 +67,7 @@ Pantheon does not yet have:
 - a working TUI
 - full ACP-native progress/thinking/tool-event mapping into Pantheon's event model
 - broader goal/task/run inspection surfaces beyond the current CLI status and inspect output
-- deeper operator controls around retry/cancel/inspection workflows
+- deeper operator controls around cancellation confirmation, runtime interruption, and richer retry workflows
 
 ## Local Setup
 
@@ -93,6 +97,8 @@ UV_CACHE_DIR=.uv-cache uv run pantheon start <goal-id>
 UV_CACHE_DIR=.uv-cache uv run pantheon status <goal-id>
 UV_CACHE_DIR=.uv-cache uv run pantheon inspect task <task-id>
 UV_CACHE_DIR=.uv-cache uv run pantheon inspect run <run-id>
+UV_CACHE_DIR=.uv-cache uv run pantheon retry task <task-id>
+UV_CACHE_DIR=.uv-cache uv run pantheon cancel goal <goal-id>
 ```
 
 ## Repository Layout

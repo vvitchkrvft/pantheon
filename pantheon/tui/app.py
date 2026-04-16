@@ -106,10 +106,7 @@ class PantheonApp(App[None]):
         self.refresh_shell_context()
         for screen in self._screens.values():
             screen.handle_group_changed()
-        active_screen = self.screen
-        handle_group_changed = getattr(active_screen, "handle_group_changed", None)
-        if active_screen not in self._screens.values() and callable(handle_group_changed):
-            handle_group_changed()
+        self._dismiss_drill_in_stack()
 
     def _reload_groups(self) -> None:
         self._groups = list_groups(self.db_path)
@@ -154,6 +151,10 @@ class PantheonApp(App[None]):
             self.query_one("#current-group-context", Static).update(
                 f"Current Group: {group_label}    g open selector    [ / ] cycle groups"
             )
+
+    def _dismiss_drill_in_stack(self) -> None:
+        while len(self._screen_stack) > 1 and self.screen not in self._screens.values():
+            self.pop_screen()
 
     def _current_group_label(self) -> str:
         self._reload_groups()

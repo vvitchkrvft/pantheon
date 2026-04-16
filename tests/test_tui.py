@@ -266,6 +266,43 @@ def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
                 "2026-04-15T00:00:02Z",
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO runs (
+                id,
+                task_id,
+                agent_id,
+                attempt_number,
+                status,
+                session_id,
+                pid,
+                exit_code,
+                error_text,
+                log_path,
+                usage_json,
+                started_at,
+                finished_at,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-3",
+                "task-child-1",
+                worker.id,
+                1,
+                "running",
+                "sess-3",
+                None,
+                None,
+                None,
+                "/tmp/run-3.log",
+                None,
+                "2026-04-15T00:00:03Z",
+                None,
+                "2026-04-15T00:00:03Z",
+            ),
+        )
         connection.executemany(
             """
             INSERT INTO events (
@@ -325,8 +362,10 @@ def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
         "goal_two_id": goal_two.goal.id,
         "task_one_id": goal_one.root_task.id,
         "task_two_id": goal_two.root_task.id,
+        "task_child_id": "task-child-1",
         "run_one_id": "run-1",
         "run_two_id": "run-2",
+        "run_three_id": "run-3",
     }
 
 
@@ -402,6 +441,48 @@ def _seed_empty_group(db_path: Path) -> dict[str, str]:
     finally:
         connection.close()
     return {"group_id": group.id}
+
+
+def _seed_goal_without_root_task(db_path: Path) -> dict[str, str]:
+    bootstrap_database(db_path)
+    group = create_group(db_path, "delta")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-4",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead-4",
+        workdir="/tmp/workdir-lead-4",
+    )
+    goal = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Root task missing",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE goals
+            SET root_task_id = NULL, created_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("2026-04-15T00:00:30Z", "2026-04-15T00:00:31Z", goal.goal.id),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET created_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("2026-04-15T00:00:30Z", "2026-04-15T00:00:31Z", goal.root_task.id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return {"group_id": group.id, "goal_id": goal.goal.id}
 
 
 def test_app_launches_into_overview_screen(tmp_path: Path) -> None:
@@ -889,5 +970,145 @@ def test_drill_in_preserves_current_group_context_on_return(tmp_path: Path) -> N
             assert app.current_group_id == beta["group_id"]
             assert app.screen.selected_goal_id == beta["goal_id"]
             assert "Current Group: beta (2/2)" in str(context.content)
+
+    asyncio.run(run_test())
+
+
+def test_goal_inspection_hops_to_root_task(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("3", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalInspectionScreen)
+            hint = app.screen.query_one("#inspection-hint", Static)
+            assert "t inspect root task" in str(hint.content)
+
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"id: {ids['task_one_id']}" in str(body.content)
+            assert "entity_type: task" in str(body.content)
+
+    asyncio.run(run_test())
+
+
+def test_task_inspection_hops_to_parent_task(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("4", "down", "down", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"id: {ids['task_child_id']}" in str(body.content)
+
+            await pilot.press("p")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"id: {ids['task_one_id']}" in str(body.content)
+            assert "title: Ship slice A" in str(body.content)
+
+    asyncio.run(run_test())
+
+
+def test_run_inspection_hops_to_task(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("5", "down", "down", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RunInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"id: {ids['run_three_id']}" in str(body.content)
+
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"id: {ids['task_child_id']}" in str(body.content)
+            assert "title: Review output" in str(body.content)
+
+    asyncio.run(run_test())
+
+
+def test_linked_multi_hop_return_navigation_is_predictable(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            context = app.query_one("#current-group-context", Static)
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+            await pilot.press("3", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalInspectionScreen)
+            assert f"id: {beta['goal_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+
+            await pilot.press("t")
+            await pilot.pause()
+            assert isinstance(app.screen, TaskInspectionScreen)
+            assert f"id: {beta['task_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalInspectionScreen)
+            assert f"id: {beta['goal_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+
+            await pilot.press("backspace")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalsScreen)
+            assert app.screen.selected_goal_id == beta["goal_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+    asyncio.run(run_test())
+
+
+def test_unavailable_link_is_explicit_and_safe(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_goal_without_root_task(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("3", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            hint = app.screen.query_one("#inspection-hint", Static)
+            assert f"id: {ids['goal_id']}" in str(body.content)
+            assert "link_root_task: t -> root task unavailable" in str(body.content)
+            assert "t root task unavailable" in str(hint.content)
+
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalInspectionScreen)
+            assert f"id: {ids['goal_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
 
     asyncio.run(run_test())

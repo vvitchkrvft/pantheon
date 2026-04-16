@@ -46,33 +46,36 @@ def start_goal_execution(
     hermes_adapter = adapter or HermesAdapter()
     connection = connect_database(db_path)
     try:
-        goal, _root_task = resolve_goal_for_start(connection, goal_id)
+        goal = resolve_goal_for_start(connection, goal_id)
         next_dispatch = _resolve_next_dispatchable_task(
             connection, goal, raise_when_none=True
         )
-        started_at = _utc_now(connection)
-        connection.execute(
-            """
-            UPDATE goals
-            SET status = 'running', started_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (started_at, started_at, goal.id),
-        )
-        insert_event(
-            connection,
-            goal_id=goal.id,
-            task_id=None,
-            run_id=None,
-            agent_id=None,
-            event_type="goal.started",
-            payload={"goal_id": goal.id, "status": "running"},
-            created_at=started_at,
-        )
-        connection.commit()
+        started_at = goal.started_at or _utc_now(connection)
+        if goal.status == "queued":
+            connection.execute(
+                """
+                UPDATE goals
+                SET status = 'running', started_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (started_at, started_at, goal.id),
+            )
+            insert_event(
+                connection,
+                goal_id=goal.id,
+                task_id=None,
+                run_id=None,
+                agent_id=None,
+                event_type="goal.started",
+                payload={"goal_id": goal.id, "status": "running"},
+                created_at=started_at,
+            )
+            connection.commit()
 
         completed_runs: list[RunRecord] = []
         while next_dispatch is not None:
+            if _goal_is_cancelled(connection, goal.id):
+                break
             task, agent = next_dispatch
             completed_runs.append(
                 _dispatch_task(
@@ -88,7 +91,8 @@ def start_goal_execution(
                 connection, goal, raise_when_none=False
             )
 
-        _reconcile_goal_state(connection, goal.id)
+        if not _goal_is_cancelled(connection, goal.id):
+            _reconcile_goal_state(connection, goal.id)
         return StartGoalResult(goal_id=goal.id, started_at=started_at, runs=completed_runs)
     finally:
         connection.close()
@@ -446,6 +450,17 @@ def _text_for_log(event: StreamEvent) -> str:
 
 
 def _reconcile_goal_state(connection, goal_id: str) -> None:
+    goal_row = connection.execute(
+        """
+        SELECT status
+        FROM goals
+        WHERE id = ?
+        """,
+        (goal_id,),
+    ).fetchone()
+    if goal_row is None or goal_row["status"] == "cancelled":
+        return
+
     task_rows = connection.execute(
         """
         SELECT status
@@ -473,6 +488,8 @@ def _apply_structured_output(
     run_id: str,
     final_text: str,
 ) -> None:
+    if _goal_is_cancelled(connection, goal_id):
+        return
     if agent.role != "lead":
         return
 
@@ -679,6 +696,18 @@ def _resolve_child_depth(
 
 def _run_log_path(db_path: Path, run_id: str) -> Path:
     return db_path.parent / "logs" / f"{run_id}.log"
+
+
+def _goal_is_cancelled(connection, goal_id: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT status
+        FROM goals
+        WHERE id = ?
+        """,
+        (goal_id,),
+    ).fetchone()
+    return row is not None and row["status"] == "cancelled"
 
 
 def _utc_now(connection) -> str:

@@ -256,6 +256,25 @@ class EventRecord:
 
 
 @dataclass(frozen=True)
+class CancelGoalResult:
+    goal_id: str
+    goal_status: str
+    queued_task_ids: list[str]
+    active_task_ids: list[str]
+    active_run_ids: list[str]
+    cancelled_at: str
+
+
+@dataclass(frozen=True)
+class RetryTaskResult:
+    task_id: str
+    goal_id: str
+    task_status: str
+    goal_status: str
+    retried_at: str
+
+
+@dataclass(frozen=True)
 class GoalSubmissionRecord:
     goal: GoalRecord
     root_task: TaskRecord
@@ -706,8 +725,22 @@ def get_goal_status(db_path: PathLike, goal_id: str) -> GoalStatusRecord:
 
 
 def get_events_for_goal(db_path: PathLike, goal_id: str) -> list[EventRecord]:
-    connection = connect_database(db_path)
+    normalized_goal_id = goal_id.strip()
+    if not normalized_goal_id:
+        raise ValueError("goal id is required")
+
+    connection = connect_readonly_database(db_path)
     try:
+        goal_exists = connection.execute(
+            """
+            SELECT 1
+            FROM goals
+            WHERE id = ?
+            """,
+            (normalized_goal_id,),
+        ).fetchone()
+        if goal_exists is None:
+            raise ValueError("goal not found")
         rows = connection.execute(
             """
             SELECT id, goal_id, task_id, run_id, agent_id, event_type, payload_json, created_at
@@ -715,8 +748,10 @@ def get_events_for_goal(db_path: PathLike, goal_id: str) -> list[EventRecord]:
             WHERE goal_id = ?
             ORDER BY created_at ASC, rowid ASC
             """,
-            (goal_id,),
+            (normalized_goal_id,),
         ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
     finally:
         connection.close()
 
@@ -803,9 +838,242 @@ def get_run_for_inspection(db_path: PathLike, run_id: str) -> RunInspectionRecor
     return RunInspectionRecord(**dict(row))
 
 
+def cancel_goal(db_path: PathLike, goal_id: str) -> CancelGoalResult:
+    normalized_goal_id = goal_id.strip()
+    if not normalized_goal_id:
+        raise ValueError("goal id is required")
+
+    connection = connect_database(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT id, status
+            FROM goals
+            WHERE id = ?
+            """,
+            (normalized_goal_id,),
+        ).fetchone()
+        if goal_row is None:
+            raise ValueError("goal not found")
+
+        goal_status = str(goal_row["status"])
+        if goal_status not in {"queued", "running"}:
+            raise ValueError(f"goal is not cancellable from state {goal_status}")
+
+        cancelled_at = _utc_now()
+        queued_task_rows = connection.execute(
+            """
+            SELECT id, assigned_agent_id
+            FROM tasks
+            WHERE goal_id = ? AND status = 'queued'
+            ORDER BY depth ASC, created_at ASC, id ASC
+            """,
+            (normalized_goal_id,),
+        ).fetchall()
+        active_task_rows = connection.execute(
+            """
+            SELECT id, assigned_agent_id
+            FROM tasks
+            WHERE goal_id = ? AND status = 'running'
+            ORDER BY depth ASC, created_at ASC, id ASC
+            """,
+            (normalized_goal_id,),
+        ).fetchall()
+        active_run_rows = connection.execute(
+            """
+            SELECT runs.id, runs.task_id, runs.agent_id, runs.status
+            FROM runs
+            JOIN tasks ON tasks.id = runs.task_id
+            WHERE tasks.goal_id = ? AND runs.status IN ('queued', 'running')
+            ORDER BY runs.created_at ASC, runs.id ASC
+            """,
+            (normalized_goal_id,),
+        ).fetchall()
+
+        connection.execute(
+            """
+            UPDATE goals
+            SET status = 'cancelled',
+                completed_at = COALESCE(completed_at, ?),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (cancelled_at, cancelled_at, normalized_goal_id),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'cancelled',
+                completed_at = ?,
+                updated_at = ?
+            WHERE goal_id = ? AND status = 'queued'
+            """,
+            (cancelled_at, cancelled_at, normalized_goal_id),
+        )
+
+        insert_event(
+            connection,
+            goal_id=normalized_goal_id,
+            task_id=None,
+            run_id=None,
+            agent_id=None,
+            event_type="goal.cancelled",
+            payload={
+                "goal_id": normalized_goal_id,
+                "status": "cancelled",
+                "queued_task_count": len(queued_task_rows),
+                "active_task_count": len(active_task_rows),
+                "active_run_count": len(active_run_rows),
+                "runtime_cancellation_supported": False,
+            },
+            created_at=cancelled_at,
+        )
+        for task_row in queued_task_rows:
+            insert_event(
+                connection,
+                goal_id=normalized_goal_id,
+                task_id=str(task_row["id"]),
+                run_id=None,
+                agent_id=str(task_row["assigned_agent_id"]),
+                event_type="task.cancelled",
+                payload={"task_id": str(task_row["id"]), "status": "cancelled"},
+                created_at=cancelled_at,
+            )
+        for run_row in active_run_rows:
+            insert_event(
+                connection,
+                goal_id=normalized_goal_id,
+                task_id=str(run_row["task_id"]),
+                run_id=str(run_row["id"]),
+                agent_id=str(run_row["agent_id"]),
+                event_type="run.cancellation_requested",
+                payload={
+                    "run_id": str(run_row["id"]),
+                    "task_id": str(run_row["task_id"]),
+                    "status": str(run_row["status"]),
+                    "runtime_cancellation_supported": False,
+                },
+                created_at=cancelled_at,
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return CancelGoalResult(
+        goal_id=normalized_goal_id,
+        goal_status="cancelled",
+        queued_task_ids=[str(row["id"]) for row in queued_task_rows],
+        active_task_ids=[str(row["id"]) for row in active_task_rows],
+        active_run_ids=[str(row["id"]) for row in active_run_rows],
+        cancelled_at=cancelled_at,
+    )
+
+
+def retry_task(db_path: PathLike, task_id: str) -> RetryTaskResult:
+    normalized_task_id = task_id.strip()
+    if not normalized_task_id:
+        raise ValueError("task id is required")
+
+    connection = connect_database(db_path)
+    try:
+        task_row = connection.execute(
+            """
+            SELECT id, goal_id, assigned_agent_id, status
+            FROM tasks
+            WHERE id = ?
+            """,
+            (normalized_task_id,),
+        ).fetchone()
+        if task_row is None:
+            raise ValueError("task not found")
+
+        task_status = str(task_row["status"])
+        if task_status not in {"failed", "cancelled"}:
+            raise ValueError(f"task is not retryable from state {task_status}")
+
+        active_run_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM runs
+            WHERE task_id = ? AND status IN ('queued', 'running')
+            """,
+            (normalized_task_id,),
+        ).fetchone()
+        if active_run_count is not None and int(active_run_count[0]) > 0:
+            raise ValueError("task already has an active run")
+
+        goal_row = connection.execute(
+            """
+            SELECT id, status
+            FROM goals
+            WHERE id = ?
+            """,
+            (str(task_row["goal_id"]),),
+        ).fetchone()
+        if goal_row is None:
+            raise ValueError("goal not found for task")
+
+        goal_status = str(goal_row["status"])
+        if goal_status == "complete":
+            raise ValueError("task cannot be retried because goal is complete")
+        if goal_status not in {"queued", "running", "cancelled"}:
+            raise ValueError(f"task cannot be retried from goal state {goal_status}")
+
+        retried_at = _utc_now()
+        next_goal_status = "queued" if goal_status == "cancelled" else goal_status
+
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'queued',
+                result_text = NULL,
+                completed_at = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (retried_at, normalized_task_id),
+        )
+        connection.execute(
+            """
+            UPDATE goals
+            SET status = ?,
+                completed_at = CASE WHEN ? = 'queued' THEN NULL ELSE completed_at END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (next_goal_status, next_goal_status, retried_at, str(task_row["goal_id"])),
+        )
+        insert_event(
+            connection,
+            goal_id=str(task_row["goal_id"]),
+            task_id=normalized_task_id,
+            run_id=None,
+            agent_id=str(task_row["assigned_agent_id"]),
+            event_type="task.retried",
+            payload={
+                "task_id": normalized_task_id,
+                "from_status": task_status,
+                "status": "queued",
+                "goal_status": next_goal_status,
+            },
+            created_at=retried_at,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return RetryTaskResult(
+        task_id=normalized_task_id,
+        goal_id=str(task_row["goal_id"]),
+        task_status="queued",
+        goal_status=next_goal_status,
+        retried_at=retried_at,
+    )
+
+
 def resolve_goal_for_start(
     connection: sqlite3.Connection, goal_id: str
-) -> tuple[GoalRecord, TaskRecord]:
+) -> GoalRecord:
     normalized_goal_id = goal_id.strip()
     if not normalized_goal_id:
         raise ValueError("goal id is required")
@@ -820,39 +1088,27 @@ def resolve_goal_for_start(
     ).fetchone()
     if goal_row is None:
         raise ValueError("goal not found")
-    if goal_row["status"] != "queued":
+    if goal_row["status"] not in {"queued", "running"}:
         raise ValueError(f"goal is not startable from state {goal_row['status']}")
-    if goal_row["root_task_id"] is None:
+    if goal_row["status"] == "queued" and goal_row["root_task_id"] is None:
         raise ValueError("goal has no root task")
+    if goal_row["root_task_id"] is not None:
+        task_row = connection.execute(
+            """
+            SELECT status
+            FROM tasks
+            WHERE id = ?
+            """,
+            (goal_row["root_task_id"],),
+        ).fetchone()
+        if task_row is None:
+            raise ValueError("goal root task not found")
+        if goal_row["status"] == "queued" and task_row["status"] != "queued":
+            raise ValueError(
+                f"goal is not startable from root task state {task_row['status']}"
+            )
 
-    task_row = connection.execute(
-        """
-        SELECT
-            id,
-            goal_id,
-            parent_task_id,
-            assigned_agent_id,
-            title,
-            input_text,
-            result_text,
-            status,
-            priority,
-            depth,
-            created_at,
-            started_at,
-            completed_at,
-            updated_at
-        FROM tasks
-        WHERE id = ?
-        """,
-        (goal_row["root_task_id"],),
-    ).fetchone()
-    if task_row is None:
-        raise ValueError("goal root task not found")
-    if task_row["status"] != "queued":
-        raise ValueError(f"goal is not startable from root task state {task_row['status']}")
-
-    return _goal_from_row(goal_row), _task_from_row(task_row)
+    return _goal_from_row(goal_row)
 
 
 def list_queued_tasks_for_goal(connection: sqlite3.Connection, goal_id: str) -> list[TaskRecord]:

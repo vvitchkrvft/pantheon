@@ -726,7 +726,108 @@ def test_start_fails_when_goal_is_not_startable(tmp_path: Path) -> None:
 
     assert second_start.returncode == 1
     assert second_start.stdout == ""
-    assert second_start.stderr == "goal is not startable from state running\n"
+    assert second_start.stderr == "goal has no queued tasks to dispatch\n"
+
+
+def test_cancel_goal_marks_queued_goal_and_tasks_cancelled(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group_result = run_pantheon(db_path, "group", "init", "research")
+    assert group_result.returncode == 0
+
+    lead_result = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "lead-1",
+        "--role",
+        "lead",
+        "--hermes-home",
+        "/tmp/hermes-home",
+        "--workdir",
+        "/tmp/workdir",
+    )
+    assert lead_result.returncode == 0
+
+    goal_result = run_pantheon(
+        db_path,
+        "goal",
+        "submit",
+        "Ship the first Pantheon slice",
+        "--group",
+        "research",
+    )
+    assert goal_result.returncode == 0
+    goal_id = goal_result.stdout.strip().split()[2]
+
+    cancel_result = run_pantheon(db_path, "cancel", "goal", goal_id)
+
+    assert cancel_result.returncode == 0
+    assert cancel_result.stderr == ""
+    assert cancel_result.stdout == f"cancelled goal {goal_id} queued_tasks 1 active_runs 0\n"
+
+    status_result = run_pantheon(db_path, "status", goal_id)
+
+    assert status_result.returncode == 0
+    assert status_result.stderr == ""
+    assert status_result.stdout.splitlines()[0].split("\t")[3] == "cancelled"
+    assert status_result.stdout.splitlines()[1].split("\t")[4] == "cancelled"
+
+
+def test_retry_task_rejects_non_terminal_state_with_deterministic_stderr(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group_result = run_pantheon(db_path, "group", "init", "research")
+    assert group_result.returncode == 0
+
+    lead_result = run_pantheon(
+        db_path,
+        "agent",
+        "add",
+        "--group",
+        "research",
+        "--name",
+        "lead-1",
+        "--role",
+        "lead",
+        "--hermes-home",
+        "/tmp/hermes-home",
+        "--workdir",
+        "/tmp/workdir",
+    )
+    assert lead_result.returncode == 0
+
+    goal_result = run_pantheon(
+        db_path,
+        "goal",
+        "submit",
+        "Ship the first Pantheon slice",
+        "--group",
+        "research",
+    )
+    assert goal_result.returncode == 0
+    task_id = goal_result.stdout.strip().split()[4]
+
+    retry_result = run_pantheon(db_path, "retry", "task", task_id)
+
+    assert retry_result.returncode == 1
+    assert retry_result.stdout == ""
+    assert retry_result.stderr == "task is not retryable from state queued\n"
+
+
+def test_audit_command_is_not_available(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    result = run_pantheon(db_path, "audit", "goal-1")
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "invalid choice: 'audit'" in result.stderr
 
 
 def test_inspect_task_prints_task_detail_and_result_text(tmp_path: Path) -> None:

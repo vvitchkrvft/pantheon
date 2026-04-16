@@ -12,10 +12,12 @@ from pantheon.adapters import (
 )
 from pantheon.db import (
     bootstrap_database,
+    cancel_goal,
     create_agent,
     create_group,
     get_events_for_goal,
     get_goal_status,
+    retry_task,
     submit_goal,
 )
 from pantheon.runner import start_goal_execution
@@ -913,7 +915,7 @@ def test_start_goal_execution_requires_queued_goal_state(tmp_path: Path) -> None
 
     start_goal_execution(db_path, submission.goal.id, adapter=_successful_adapter())
 
-    with pytest.raises(ValueError, match="goal is not startable from state running"):
+    with pytest.raises(ValueError, match="goal has no queued tasks to dispatch"):
         start_goal_execution(
             db_path, submission.goal.id, adapter=_successful_adapter()
         )
@@ -1928,3 +1930,512 @@ def test_start_goal_execution_skips_ineligible_task_and_dispatches_later_eligibl
     assert worker_row[1] is not None
     assert worker_row[2] is not None
     assert run_rows == [("task-worker-1", "complete")]
+
+
+def test_cancel_goal_marks_queued_goal_and_tasks_cancelled_with_events(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    worker = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="worker-1",
+        role="worker",
+        hermes_home="/tmp/hermes-home-worker",
+        workdir="/tmp/workdir-worker",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id,
+                goal_id,
+                parent_task_id,
+                assigned_agent_id,
+                title,
+                input_text,
+                result_text,
+                status,
+                priority,
+                depth,
+                created_at,
+                started_at,
+                completed_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-child-1",
+                submission.goal.id,
+                submission.root_task.id,
+                worker.id,
+                "Review outputs",
+                "Review outputs",
+                None,
+                "queued",
+                5,
+                1,
+                "2026-04-15T00:00:01Z",
+                None,
+                None,
+                "2026-04-15T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = cancel_goal(db_path, submission.goal.id)
+
+    assert result.goal_id == submission.goal.id
+    assert result.goal_status == "cancelled"
+    assert result.active_run_ids == []
+    assert result.active_task_ids == []
+    assert result.queued_task_ids == [submission.root_task.id, "task-child-1"]
+
+    connection = sqlite3.connect(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT status, completed_at
+            FROM goals
+            WHERE id = ?
+            """,
+            (submission.goal.id,),
+        ).fetchone()
+        task_rows = connection.execute(
+            """
+            SELECT id, status, completed_at
+            FROM tasks
+            WHERE goal_id = ?
+            ORDER BY depth ASC, created_at ASC, id ASC
+            """,
+            (submission.goal.id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert goal_row == ("cancelled", result.cancelled_at)
+    assert task_rows == [
+        (submission.root_task.id, "cancelled", result.cancelled_at),
+        ("task-child-1", "cancelled", result.cancelled_at),
+    ]
+    assert [event.event_type for event in get_events_for_goal(db_path, submission.goal.id)] == [
+        "goal.cancelled",
+        "task.cancelled",
+        "task.cancelled",
+    ]
+
+
+def test_cancel_goal_keeps_running_task_and_run_truthful_when_runtime_cancellation_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE goals
+            SET status = ?, started_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("running", "2026-04-15T00:00:01Z", "2026-04-15T00:00:01Z", submission.goal.id),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = ?, started_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("running", "2026-04-15T00:00:01Z", "2026-04-15T00:00:01Z", submission.root_task.id),
+        )
+        connection.execute(
+            """
+            UPDATE agents
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("busy", "2026-04-15T00:00:01Z", lead.id),
+        )
+        connection.execute(
+            """
+            INSERT INTO runs (
+                id,
+                task_id,
+                agent_id,
+                attempt_number,
+                status,
+                session_id,
+                pid,
+                exit_code,
+                error_text,
+                log_path,
+                usage_json,
+                started_at,
+                finished_at,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-1",
+                submission.root_task.id,
+                lead.id,
+                1,
+                "running",
+                "session-1",
+                123,
+                None,
+                None,
+                str(tmp_path / "logs" / "run-1.log"),
+                None,
+                "2026-04-15T00:00:01Z",
+                None,
+                "2026-04-15T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = cancel_goal(db_path, submission.goal.id)
+
+    assert result.goal_status == "cancelled"
+    assert result.queued_task_ids == []
+    assert result.active_task_ids == [submission.root_task.id]
+    assert result.active_run_ids == ["run-1"]
+
+    connection = sqlite3.connect(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT status, completed_at
+            FROM goals
+            WHERE id = ?
+            """,
+            (submission.goal.id,),
+        ).fetchone()
+        task_row = connection.execute(
+            """
+            SELECT status, completed_at
+            FROM tasks
+            WHERE id = ?
+            """,
+            (submission.root_task.id,),
+        ).fetchone()
+        run_row = connection.execute(
+            """
+            SELECT status, finished_at
+            FROM runs
+            WHERE id = 'run-1'
+            """
+        ).fetchone()
+        agent_row = connection.execute(
+            """
+            SELECT status
+            FROM agents
+            WHERE id = ?
+            """,
+            (lead.id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert goal_row == ("cancelled", result.cancelled_at)
+    assert task_row == ("running", None)
+    assert run_row == ("running", None)
+    assert agent_row == ("busy",)
+    events = get_events_for_goal(db_path, submission.goal.id)
+    assert [event.event_type for event in events] == [
+        "goal.cancelled",
+        "run.cancellation_requested",
+    ]
+    assert events[1].payload_json == (
+        '{"run_id": "run-1", "runtime_cancellation_supported": false, '
+        '"status": "running", "task_id": "'
+        + submission.root_task.id
+        + '"}'
+    )
+
+
+def test_cancel_goal_emits_truthful_run_cancellation_requested_status_for_queued_run(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE goals
+            SET status = ?, started_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("running", "2026-04-15T00:00:01Z", "2026-04-15T00:00:01Z", submission.goal.id),
+        )
+        connection.execute(
+            """
+            UPDATE agents
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("busy", "2026-04-15T00:00:01Z", lead.id),
+        )
+        connection.execute(
+            """
+            INSERT INTO runs (
+                id,
+                task_id,
+                agent_id,
+                attempt_number,
+                status,
+                session_id,
+                pid,
+                exit_code,
+                error_text,
+                log_path,
+                usage_json,
+                started_at,
+                finished_at,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-queued-1",
+                submission.root_task.id,
+                lead.id,
+                1,
+                "queued",
+                None,
+                None,
+                None,
+                None,
+                str(tmp_path / "logs" / "run-queued-1.log"),
+                None,
+                None,
+                None,
+                "2026-04-15T00:00:01Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = cancel_goal(db_path, submission.goal.id)
+
+    assert result.active_run_ids == ["run-queued-1"]
+    events = get_events_for_goal(db_path, submission.goal.id)
+    assert [event.event_type for event in events] == [
+        "goal.cancelled",
+        "task.cancelled",
+        "run.cancellation_requested",
+    ]
+    assert events[2].payload_json == (
+        '{"run_id": "run-queued-1", "runtime_cancellation_supported": false, '
+        '"status": "queued", "task_id": "'
+        + submission.root_task.id
+        + '"}'
+    )
+
+
+def test_retry_task_requeues_failed_task_and_next_start_creates_new_run_attempt(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    start_goal_execution(db_path, submission.goal.id, adapter=RaisingAdapter())
+
+    retry_result = retry_task(db_path, submission.root_task.id)
+
+    assert retry_result.task_id == submission.root_task.id
+    assert retry_result.goal_id == submission.goal.id
+    assert retry_result.task_status == "queued"
+    assert retry_result.goal_status == "running"
+
+    connection = sqlite3.connect(db_path)
+    try:
+        task_row = connection.execute(
+            """
+            SELECT status, result_text, completed_at
+            FROM tasks
+            WHERE id = ?
+            """,
+            (submission.root_task.id,),
+        ).fetchone()
+        prior_runs = connection.execute(
+            """
+            SELECT id, attempt_number, status
+            FROM runs
+            WHERE task_id = ?
+            ORDER BY attempt_number ASC
+            """,
+            (submission.root_task.id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert task_row == ("queued", None, None)
+    assert len(prior_runs) == 1
+    assert prior_runs[0][1:] == (1, "failed")
+
+    start_result = start_goal_execution(
+        db_path, submission.goal.id, adapter=_successful_adapter()
+    )
+
+    assert [run.attempt_number for run in start_result.runs] == [2]
+
+    connection = sqlite3.connect(db_path)
+    try:
+        run_rows = connection.execute(
+            """
+            SELECT attempt_number, status
+            FROM runs
+            WHERE task_id = ?
+            ORDER BY attempt_number ASC
+            """,
+            (submission.root_task.id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert run_rows == [(1, "failed"), (2, "complete")]
+    assert [event.event_type for event in get_events_for_goal(db_path, submission.goal.id)] == [
+        "goal.started",
+        "run.started",
+        "task.started",
+        "run.failed",
+        "task.failed",
+        "task.retried",
+        "run.started",
+        "task.started",
+        "run.output",
+        "run.completed",
+        "task.completed",
+    ]
+
+
+def test_retry_task_rejects_non_terminal_task_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    with pytest.raises(ValueError, match="task is not retryable from state queued"):
+        retry_task(db_path, submission.root_task.id)
+
+
+def test_retry_task_reopens_cancelled_goal_as_queued(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    cancel_goal(db_path, submission.goal.id)
+
+    retry_result = retry_task(db_path, submission.root_task.id)
+
+    assert retry_result.goal_status == "queued"
+
+    connection = sqlite3.connect(db_path)
+    try:
+        goal_row = connection.execute(
+            """
+            SELECT status, completed_at
+            FROM goals
+            WHERE id = ?
+            """,
+            (submission.goal.id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert goal_row == ("queued", None)

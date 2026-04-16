@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Sequence
 
 from pantheon.db import (
+    cancel_goal,
     create_agent,
     create_group,
     get_goal_status,
     get_run_for_inspection,
     get_task_for_inspection,
     list_groups,
+    retry_task,
     submit_goal,
 )
 from pantheon.runner import start_goal_execution
@@ -55,6 +57,16 @@ def build_parser() -> argparse.ArgumentParser:
     goal_submit_parser.add_argument("goal_text")
     goal_submit_parser.add_argument("--group", required=True)
 
+    cancel_parser = subparsers.add_parser("cancel")
+    cancel_subparsers = cancel_parser.add_subparsers(dest="cancel_command", required=True)
+    cancel_goal_parser = cancel_subparsers.add_parser("goal")
+    cancel_goal_parser.add_argument("goal_id")
+
+    retry_parser = subparsers.add_parser("retry")
+    retry_subparsers = retry_parser.add_subparsers(dest="retry_command", required=True)
+    retry_task_parser = retry_subparsers.add_parser("task")
+    retry_task_parser.add_argument("task_id")
+
     start_parser = subparsers.add_parser("start")
     start_parser.add_argument("goal_id")
 
@@ -85,6 +97,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _handle_agent_command(args)
     if args.command == "goal":
         return _handle_goal_command(args)
+    if args.command == "cancel":
+        return _handle_cancel_command(args)
+    if args.command == "retry":
+        return _handle_retry_command(args)
     if args.command == "start":
         return _handle_start_command(args)
     if args.command == "status":
@@ -194,6 +210,43 @@ def _handle_status_command(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def _handle_cancel_command(args: argparse.Namespace) -> int:
+    try:
+        if args.cancel_command == "goal":
+            result = cancel_goal(args.db, args.goal_id)
+            print(
+                "cancelled goal "
+                f"{result.goal_id} "
+                f"queued_tasks {len(result.queued_task_ids)} "
+                f"active_runs {len(result.active_run_ids)}"
+            )
+            return 0
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    parser = build_parser()
+    parser.print_usage(sys.stderr)
+    return 1
+
+
+def _handle_retry_command(args: argparse.Namespace) -> int:
+    try:
+        if args.retry_command == "task":
+            result = retry_task(args.db, args.task_id)
+            print(
+                f"retried task {result.task_id} goal {result.goal_id} goal_status {result.goal_status}"
+            )
+            return 0
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    parser = build_parser()
+    parser.print_usage(sys.stderr)
+    return 1
 
 
 def _handle_start_command(args: argparse.Namespace) -> int:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widgets import ListItem, ListView, Static
@@ -72,6 +73,10 @@ class GoalsScreen(PantheonScreen):
             )
         list_view.index = target_index
         self._sync_selection_from_index(target_index)
+        if self.selected_goal_id is not None:
+            detail.update(
+                _format_goal_detail(get_goal_for_tui(self.pantheon_app.db_path, self.selected_goal_id))
+            )
 
     def handle_group_changed(self) -> None:
         if self.is_mounted:
@@ -94,7 +99,10 @@ class GoalsScreen(PantheonScreen):
         self.app.push_screen(GoalInspectionScreen(self.selected_goal_id))
 
     def watch_selected_goal_id(self, old_value: str | None, new_value: str | None) -> None:
-        detail = self.query_one("#goals-detail", Static)
+        try:
+            detail = self.query_one("#goals-detail", Static)
+        except NoMatches:
+            return
         if new_value is None:
             if self.pantheon_app.current_group_id is None:
                 detail.update("No groups configured.")

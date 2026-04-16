@@ -2,11 +2,12 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
-from textual.widgets import ListView, Static
+from textual.widgets import Input, ListView, Static
 
 from pantheon.db import bootstrap_database, create_agent, create_group, submit_goal
 from pantheon.tui import PantheonApp
 from pantheon.tui.screens.agents import AgentsScreen
+from pantheon.tui.screens.goal_submit import GoalSubmitScreen
 from pantheon.tui.screens.group_selector import GroupSelectorScreen
 from pantheon.tui.screens.goals import GoalsScreen
 from pantheon.tui.screens.inspection import (
@@ -1095,6 +1096,216 @@ def test_group_selector_cancel_keeps_current_group(tmp_path: Path) -> None:
             assert app.current_group_id == alpha["group_id"]
             assert "Current Group: alpha (1/2)" in str(context.content)
             assert not isinstance(app.screen, GroupSelectorScreen)
+
+    asyncio.run(run_test())
+
+
+def test_goal_submission_modal_opens_from_shell(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    group = create_group(db_path, "alpha")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead",
+        workdir="/tmp/workdir-lead",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalSubmitScreen)
+            group_context = app.screen.query_one("#goal-submit-group", Static)
+            assert "Current group: alpha (1/1)" in str(group_context.content)
+            assert app.screen.query_one("#goal-submit-input", Input) is not None
+
+    asyncio.run(run_test())
+
+
+def test_goal_submission_modal_accepts_typed_goal_text(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    group = create_group(db_path, "alpha")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead",
+        workdir="/tmp/workdir-lead",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+
+            await pilot.press(
+                "s",
+                "h",
+                "i",
+                "p",
+                "space",
+                "n",
+                "e",
+                "w",
+                "space",
+                "s",
+                "l",
+                "i",
+                "c",
+                "e",
+            )
+            await pilot.pause()
+
+            input_widget = app.screen.query_one("#goal-submit-input", Input)
+            assert input_widget.value == "ship new slice"
+
+    asyncio.run(run_test())
+
+
+def test_goal_submission_success_persists_and_returns_to_goals(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    group = create_group(db_path, "alpha")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead",
+        workdir="/tmp/workdir-lead",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            await pilot.press("s", "h", "i", "p", "space", "a", "l", "p", "h", "a", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalsScreen)
+            assert app.current_screen_name == "goals"
+            assert app.screen.selected_goal_id is not None
+            detail = app.screen.query_one("#goals-detail", Static)
+            assert "title: ship alpha" in str(detail.content)
+
+        connection = sqlite3.connect(db_path)
+        try:
+            goal_row = connection.execute("SELECT title, status FROM goals").fetchone()
+            task_row = connection.execute("SELECT title, status FROM tasks").fetchone()
+        finally:
+            connection.close()
+
+        assert goal_row == ("ship alpha", "queued")
+        assert task_row == ("ship alpha", "queued")
+
+    asyncio.run(run_test())
+
+
+def test_goal_submission_refreshes_overview_and_tasks_after_success(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    group = create_group(db_path, "alpha")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead",
+        workdir="/tmp/workdir-lead",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            primary = app.screen.query_one("#overview-primary-readout", Static)
+            assert "goals: 0 active=0" in str(primary.content)
+            assert "tasks: 0 active=0" in str(primary.content)
+
+            await pilot.press("n")
+            await pilot.pause()
+            await pilot.press("s", "h", "i", "p", "space", "b", "e", "t", "a", "enter")
+            await pilot.pause()
+
+            await pilot.press("1")
+            await pilot.pause()
+            primary = app.screen.query_one("#overview-primary-readout", Static)
+            assert "goals: 1 active=1" in str(primary.content)
+            assert "tasks: 1 active=1" in str(primary.content)
+
+            await pilot.press("4")
+            await pilot.pause()
+            assert isinstance(app.screen, TasksScreen)
+            detail = app.screen.query_one("#tasks-detail", Static)
+            assert "title: ship beta" in str(detail.content)
+            assert "status: queued" in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_goal_submission_rejects_empty_input(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    group = create_group(db_path, "alpha")
+    create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home-lead",
+        workdir="/tmp/workdir-lead",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalSubmitScreen)
+            status = app.screen.query_one("#goal-submit-status", Static)
+            assert "Error: goal text must not be empty" in str(status.content)
+
+    asyncio.run(run_test())
+
+
+def test_goal_submission_rejects_missing_current_group(tmp_path: Path) -> None:
+    async def run_test() -> None:
+        app = PantheonApp(tmp_path / "pantheon.db")
+        async with app.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            await pilot.press("s", "h", "i", "p", "space", "x", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalSubmitScreen)
+            status = app.screen.query_one("#goal-submit-status", Static)
+            assert "Error: no current group selected" in str(status.content)
+
+    asyncio.run(run_test())
+
+
+def test_goal_submission_displays_backend_error(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    create_group(db_path, "alpha")
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            await pilot.press("s", "h", "i", "p", "space", "g", "a", "m", "m", "a", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, GoalSubmitScreen)
+            status = app.screen.query_one("#goal-submit-status", Static)
+            assert "Error: group has no lead agent" in str(status.content)
 
     asyncio.run(run_test())
 

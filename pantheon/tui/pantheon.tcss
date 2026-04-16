@@ -43,6 +43,41 @@ Footer {
     color: $text-muted;
 }
 
+#goal-submit-modal {
+    width: 80;
+    height: 16;
+    margin: 7 12;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+
+#goal-submit-title {
+    height: auto;
+    padding-bottom: 1;
+    text-style: bold;
+}
+
+#goal-submit-group {
+    height: auto;
+    padding-bottom: 1;
+}
+
+#goal-submit-input {
+    margin-bottom: 1;
+}
+
+#goal-submit-hint {
+    height: auto;
+    color: $text-muted;
+}
+
+#goal-submit-status {
+    height: auto;
+    padding-top: 1;
+    color: $error;
+}
+
 .panel {
     border: round $primary;
     height: 1fr;

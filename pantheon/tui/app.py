@@ -9,8 +9,16 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Static
 
-from pantheon.db import GroupRecord, PathLike, bootstrap_database, list_groups, resolve_current_group_id
+from pantheon.db import (
+    GoalSubmissionRecord,
+    GroupRecord,
+    PathLike,
+    bootstrap_database,
+    list_groups,
+    resolve_current_group_id,
+)
 from pantheon.tui.screens.agents import AgentsScreen
+from pantheon.tui.screens.goal_submit import GoalSubmitScreen
 from pantheon.tui.screens.goals import GoalsScreen
 from pantheon.tui.screens.group_selector import GroupSelectorScreen
 from pantheon.tui.screens.overview import OverviewScreen
@@ -42,6 +50,7 @@ class PantheonApp(App[None]):
         Binding("5", "go_to_screen('runs')", "Runs"),
         Binding("6", "go_to_screen('settings')", "Settings"),
         Binding("g", "open_group_selector", "Group Selector"),
+        Binding("n", "open_goal_submit", "New Goal"),
         Binding("[", "previous_group", "Prev Group"),
         Binding("]", "next_group", "Next Group"),
         Binding("q", "quit", "Quit"),
@@ -100,6 +109,9 @@ class PantheonApp(App[None]):
             callback=self._handle_group_selector_dismissed,
         )
 
+    def action_open_goal_submit(self) -> None:
+        self.push_screen(GoalSubmitScreen(), callback=self._handle_goal_submit_dismissed)
+
     def watch_current_group_id(self, old_value: str | None, new_value: str | None) -> None:
         if old_value == new_value:
             return
@@ -140,8 +152,36 @@ class PantheonApp(App[None]):
             return
         self.select_group(selected_group_id)
 
+    def _handle_goal_submit_dismissed(
+        self,
+        submission: GoalSubmissionRecord | None,
+    ) -> None:
+        if submission is None:
+            return
+
+        self.action_go_to_screen("goals")
+        self.call_after_refresh(self._finalize_goal_submission, submission)
+
+    def _finalize_goal_submission(self, submission: GoalSubmissionRecord) -> None:
+        goals_screen = self._screens["goals"]
+        tasks_screen = self._screens["tasks"]
+        if isinstance(goals_screen, GoalsScreen):
+            goals_screen.selected_goal_id = submission.goal.id
+        if isinstance(tasks_screen, TasksScreen):
+            tasks_screen.selected_task_id = submission.root_task.id
+
+        self._refresh_tui_state_after_goal_submission()
+
     def refresh_shell_context(self, screen_title: str | None = None) -> None:
         self._update_shell_context(screen_title=screen_title)
+
+    def _refresh_tui_state_after_goal_submission(self) -> None:
+        for screen in self._screens.values():
+            if screen.is_mounted:
+                screen.refresh_screen_data()
+
+    def current_group_label(self) -> str:
+        return self._current_group_label()
 
     def _update_shell_context(self, screen_title: str | None = None) -> None:
         screen_title = screen_title or dict(SCREEN_ORDER).get(self.current_screen_name, "Overview")

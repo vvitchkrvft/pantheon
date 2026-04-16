@@ -16,6 +16,7 @@ from pantheon.db import (
     create_agent,
     create_group,
     get_events_for_goal,
+    get_events_for_task,
     get_goal_status,
     retry_task,
     submit_goal,
@@ -973,6 +974,73 @@ def test_start_goal_execution_with_busy_agent_does_not_false_start(tmp_path: Pat
     assert goal_row == ("queued", None)
     assert run_count == (0,)
     assert get_events_for_goal(db_path, submission.goal.id) == []
+
+
+def test_get_events_for_task_returns_task_scoped_events_only(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executemany(
+            """
+            INSERT INTO events (
+                id,
+                goal_id,
+                task_id,
+                run_id,
+                agent_id,
+                event_type,
+                payload_json,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "event-task-1",
+                    submission.goal.id,
+                    submission.root_task.id,
+                    None,
+                    lead.id,
+                    "task.started",
+                    '{"status":"running"}',
+                    "2026-04-15T00:00:01Z",
+                ),
+                (
+                    "event-goal-1",
+                    submission.goal.id,
+                    None,
+                    None,
+                    lead.id,
+                    "goal.started",
+                    '{"status":"running"}',
+                    "2026-04-15T00:00:02Z",
+                ),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    events = get_events_for_task(db_path, submission.root_task.id)
+
+    assert [event.event_type for event in events] == ["task.started"]
+    assert events[0].task_id == submission.root_task.id
 
 
 def test_start_goal_execution_persists_terminal_failure_when_hermes_launch_fails(

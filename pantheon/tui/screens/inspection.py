@@ -18,6 +18,7 @@ from pantheon.db import (
     TaskDetailRecord,
     get_events_for_goal,
     get_events_for_run,
+    get_events_for_task,
     get_goal_for_tui,
     get_run_for_inspection,
     get_task_for_tui,
@@ -142,6 +143,7 @@ class TaskInspectionScreen(InspectionScreen):
 
     BINDINGS = [
         *InspectionScreen.BINDINGS,
+        Binding("e", "open_event_history", "Events", show=False),
         Binding("p", "open_parent_task", "Parent Task", show=False),
     ]
     inspection_title = "Task Inspect"
@@ -187,14 +189,17 @@ class TaskInspectionScreen(InspectionScreen):
     def render_hint(self) -> str:
         task = self._get_task()
         if task.parent_task_id is None:
-            return "p parent task unavailable    Escape or Backspace returns to the previous screen."
-        return "p inspect parent task    Escape or Backspace returns to the previous screen."
+            return "e inspect event history    p parent task unavailable    Escape or Backspace returns to the previous screen."
+        return "e inspect event history    p inspect parent task    Escape or Backspace returns to the previous screen."
 
     def action_open_parent_task(self) -> None:
         task = self._get_task()
         if task.parent_task_id is None:
             return
         self.app.push_screen(TaskInspectionScreen(task.parent_task_id))
+
+    def action_open_event_history(self) -> None:
+        self.app.push_screen(TaskEventHistoryScreen(self.task_id))
 
     def _get_task(self) -> TaskDetailRecord:
         return get_task_for_tui(self.pantheon_app.db_path, self.task_id)
@@ -328,6 +333,23 @@ class RunEventHistoryScreen(EventHistoryScreen):
 
     def get_events(self) -> list[EventRecord]:
         return get_events_for_run(self.pantheon_app.db_path, self.run_id)
+
+
+class TaskEventHistoryScreen(EventHistoryScreen):
+    """Read-only task event history screen."""
+
+    inspection_title = "Task History"
+    empty_message = "No event history recorded for this task."
+
+    def __init__(self, task_id: str) -> None:
+        super().__init__()
+        self.task_id = task_id
+
+    def header_line(self) -> str:
+        return f"task_id: {self.task_id}"
+
+    def get_events(self) -> list[EventRecord]:
+        return get_events_for_task(self.pantheon_app.db_path, self.task_id)
 
 
 def _format_event_payload(event: EventRecord) -> str:

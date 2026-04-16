@@ -1364,6 +1364,40 @@ def get_events_for_goal(db_path: PathLike, goal_id: str) -> list[EventRecord]:
     return [EventRecord(**dict(row)) for row in rows]
 
 
+def get_events_for_task(db_path: PathLike, task_id: str) -> list[EventRecord]:
+    normalized_task_id = task_id.strip()
+    if not normalized_task_id:
+        raise ValueError("task id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        task_exists = connection.execute(
+            """
+            SELECT 1
+            FROM tasks
+            WHERE id = ?
+            """,
+            (normalized_task_id,),
+        ).fetchone()
+        if task_exists is None:
+            raise ValueError("task not found")
+        rows = connection.execute(
+            """
+            SELECT id, goal_id, task_id, run_id, agent_id, event_type, payload_json, created_at
+            FROM events
+            WHERE task_id = ?
+            ORDER BY created_at ASC, rowid ASC
+            """,
+            (normalized_task_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    return [EventRecord(**dict(row)) for row in rows]
+
+
 def get_events_for_run(db_path: PathLike, run_id: str) -> list[EventRecord]:
     normalized_run_id = run_id.strip()
     if not normalized_run_id:

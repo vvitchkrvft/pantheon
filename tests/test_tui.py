@@ -14,6 +14,7 @@ from pantheon.tui.screens.inspection import (
     GoalInspectionScreen,
     RunEventHistoryScreen,
     RunInspectionScreen,
+    TaskEventHistoryScreen,
     TaskInspectionScreen,
 )
 from pantheon.tui.screens.runs import RunsScreen
@@ -1271,6 +1272,34 @@ def test_task_inspection_hops_to_parent_task(tmp_path: Path) -> None:
     asyncio.run(run_test())
 
 
+def test_task_inspection_opens_task_event_history(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("4", "down", "down", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            hint = app.screen.query_one("#inspection-hint", Static)
+            assert "e inspect event history" in str(hint.content)
+
+            await pilot.press("e")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskEventHistoryScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            content = str(body.content)
+            assert f"task_id: {ids['task_child_id']}" in content
+            assert "2026-04-15T00:00:07Z  task.started" in content
+            assert "payload: assigned_agent='worker-1', status='running'" in content
+            assert "run.completed" not in content
+
+    asyncio.run(run_test())
+
+
 def test_run_inspection_hops_to_task(tmp_path: Path) -> None:
     db_path = tmp_path / "pantheon.db"
     ids = _seed_readonly_tui_data(db_path)
@@ -1346,6 +1375,32 @@ def test_event_history_empty_state_is_explicit(tmp_path: Path) -> None:
     asyncio.run(run_test())
 
 
+def test_task_event_history_empty_state_is_explicit(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("]")
+            await pilot.pause()
+
+            await pilot.press("4", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, TaskInspectionScreen)
+
+            await pilot.press("e")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskEventHistoryScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"task_id: {beta['task_id']}" in str(body.content)
+            assert "No event history recorded for this task." in str(body.content)
+
+    asyncio.run(run_test())
+
+
 def test_event_history_preserves_current_group_context(tmp_path: Path) -> None:
     db_path = tmp_path / "pantheon.db"
     _seed_readonly_tui_data(db_path)
@@ -1367,6 +1422,31 @@ def test_event_history_preserves_current_group_context(tmp_path: Path) -> None:
             assert isinstance(app.screen, GoalEventHistoryScreen)
             assert "Current Group: beta (2/2)" in str(context.content)
             assert f"goal_id: {beta['goal_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+
+    asyncio.run(run_test())
+
+
+def test_task_event_history_preserves_current_group_context(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            context = app.query_one("#current-group-context", Static)
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.current_group_id == beta["group_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+            await pilot.press("4", "enter", "e")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskEventHistoryScreen)
+            assert "Current Group: beta (2/2)" in str(context.content)
+            assert f"task_id: {beta['task_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
 
     asyncio.run(run_test())
 
@@ -1393,6 +1473,32 @@ def test_event_history_return_navigation_is_deterministic(tmp_path: Path) -> Non
             await pilot.pause()
             assert isinstance(app.screen, GoalsScreen)
             assert app.screen.selected_goal_id == ids["goal_one_id"]
+
+    asyncio.run(run_test())
+
+
+def test_task_event_history_return_navigation_is_deterministic(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("4", "down", "down", "enter", "e")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskEventHistoryScreen)
+            assert f"task_id: {ids['task_child_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, TaskInspectionScreen)
+            assert f"id: {ids['task_child_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+
+            await pilot.press("backspace")
+            await pilot.pause()
+            assert isinstance(app.screen, TasksScreen)
+            assert app.screen.selected_task_id == ids["task_child_id"]
 
     asyncio.run(run_test())
 

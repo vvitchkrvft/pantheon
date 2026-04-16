@@ -256,6 +256,101 @@ class EventRecord:
 
 
 @dataclass(frozen=True)
+class OverviewSummaryRecord:
+    group_id: str
+    group_name: str
+    agent_count: int
+    goal_count: int
+    task_count: int
+    run_count: int
+    active_goal_count: int
+    active_task_count: int
+    active_run_count: int
+
+
+@dataclass(frozen=True)
+class GoalDetailRecord:
+    id: str
+    group_id: str
+    title: str
+    status: str
+    root_task_id: str | None
+    started_at: str | None
+    completed_at: str | None
+    created_at: str
+    updated_at: str
+    task_count: int
+    run_count: int
+
+
+@dataclass(frozen=True)
+class TaskListItemRecord:
+    id: str
+    goal_id: str
+    assigned_agent_id: str
+    title: str
+    status: str
+    depth: int
+    priority: int
+    created_at: str
+    assigned_agent_name: str
+    goal_title: str
+
+
+@dataclass(frozen=True)
+class TaskDetailRecord:
+    id: str
+    goal_id: str
+    parent_task_id: str | None
+    assigned_agent_id: str
+    assigned_agent_name: str
+    goal_title: str
+    title: str
+    input_text: str
+    result_text: str | None
+    status: str
+    priority: int
+    depth: int
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class RunListItemRecord:
+    id: str
+    task_id: str
+    agent_id: str
+    attempt_number: int
+    status: str
+    created_at: str
+    task_title: str
+    agent_name: str
+
+
+@dataclass(frozen=True)
+class RunDetailRecord:
+    id: str
+    task_id: str
+    agent_id: str
+    attempt_number: int
+    status: str
+    session_id: str | None
+    pid: int | None
+    exit_code: int | None
+    error_text: str | None
+    log_path: str
+    usage_json: str | None
+    started_at: str | None
+    finished_at: str | None
+    created_at: str
+    task_title: str
+    agent_name: str
+    goal_title: str
+
+
+@dataclass(frozen=True)
 class CancelGoalResult:
     goal_id: str
     goal_status: str
@@ -434,6 +529,465 @@ def list_groups(db_path: PathLike) -> list[GroupRecord]:
         connection.close()
 
     return [GroupRecord(**dict(row)) for row in rows]
+
+
+def resolve_current_group_id(db_path: PathLike) -> str | None:
+    groups = list_groups(db_path)
+    if not groups:
+        return None
+    return groups[0].id
+
+
+def get_group_for_tui(db_path: PathLike, group_id: str) -> GroupRecord:
+    normalized_group_id = group_id.strip()
+    if not normalized_group_id:
+        raise ValueError("group id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT id, name, created_at, updated_at
+            FROM groups
+            WHERE id = ?
+            """,
+            (normalized_group_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        raise ValueError("group not found")
+
+    return GroupRecord(**dict(row))
+
+
+def get_overview_summary(db_path: PathLike, group_id: str) -> OverviewSummaryRecord:
+    normalized_group_id = group_id.strip()
+    if not normalized_group_id:
+        raise ValueError("group id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                groups.id AS group_id,
+                groups.name AS group_name,
+                (
+                    SELECT COUNT(*)
+                    FROM agents
+                    WHERE agents.group_id = groups.id
+                ) AS agent_count,
+                (
+                    SELECT COUNT(*)
+                    FROM goals
+                    WHERE goals.group_id = groups.id
+                ) AS goal_count,
+                (
+                    SELECT COUNT(*)
+                    FROM tasks
+                    JOIN goals ON goals.id = tasks.goal_id
+                    WHERE goals.group_id = groups.id
+                ) AS task_count,
+                (
+                    SELECT COUNT(*)
+                    FROM runs
+                    JOIN tasks ON tasks.id = runs.task_id
+                    JOIN goals ON goals.id = tasks.goal_id
+                    WHERE goals.group_id = groups.id
+                ) AS run_count,
+                (
+                    SELECT COUNT(*)
+                    FROM goals
+                    WHERE goals.group_id = groups.id
+                      AND goals.status IN ('queued', 'running')
+                ) AS active_goal_count,
+                (
+                    SELECT COUNT(*)
+                    FROM tasks
+                    JOIN goals ON goals.id = tasks.goal_id
+                    WHERE goals.group_id = groups.id
+                      AND tasks.status IN ('queued', 'running')
+                ) AS active_task_count,
+                (
+                    SELECT COUNT(*)
+                    FROM runs
+                    JOIN tasks ON tasks.id = runs.task_id
+                    JOIN goals ON goals.id = tasks.goal_id
+                    WHERE goals.group_id = groups.id
+                      AND runs.status IN ('queued', 'running')
+                ) AS active_run_count
+            FROM groups
+            WHERE groups.id = ?
+            """,
+            (normalized_group_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        raise ValueError("group not found")
+
+    return OverviewSummaryRecord(**dict(row))
+
+
+def list_agents_for_group(db_path: PathLike, group_id: str) -> list[AgentRecord]:
+    normalized_group_id = group_id.strip()
+    if not normalized_group_id:
+        raise ValueError("group id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                id,
+                group_id,
+                name,
+                role,
+                profile_name,
+                hermes_home,
+                workdir,
+                model_override,
+                provider_override,
+                status,
+                created_at,
+                updated_at
+            FROM agents
+            WHERE group_id = ?
+            ORDER BY CASE role WHEN 'lead' THEN 0 ELSE 1 END, name ASC, id ASC
+            """,
+            (normalized_group_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    return [AgentRecord(**dict(row)) for row in rows]
+
+
+def get_agent_for_tui(db_path: PathLike, agent_id: str) -> AgentRecord:
+    normalized_agent_id = agent_id.strip()
+    if not normalized_agent_id:
+        raise ValueError("agent id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                group_id,
+                name,
+                role,
+                profile_name,
+                hermes_home,
+                workdir,
+                model_override,
+                provider_override,
+                status,
+                created_at,
+                updated_at
+            FROM agents
+            WHERE id = ?
+            """,
+            (normalized_agent_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        raise ValueError("agent not found")
+
+    return AgentRecord(**dict(row))
+
+
+def list_goals_for_group(db_path: PathLike, group_id: str) -> list[GoalDetailRecord]:
+    normalized_group_id = group_id.strip()
+    if not normalized_group_id:
+        raise ValueError("group id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                goals.id,
+                goals.group_id,
+                goals.title,
+                goals.status,
+                goals.root_task_id,
+                goals.started_at,
+                goals.completed_at,
+                goals.created_at,
+                goals.updated_at,
+                COUNT(DISTINCT tasks.id) AS task_count,
+                COUNT(DISTINCT runs.id) AS run_count
+            FROM goals
+            LEFT JOIN tasks ON tasks.goal_id = goals.id
+            LEFT JOIN runs ON runs.task_id = tasks.id
+            WHERE goals.group_id = ?
+            GROUP BY goals.id
+            ORDER BY goals.created_at ASC, goals.id ASC
+            """,
+            (normalized_group_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    return [GoalDetailRecord(**dict(row)) for row in rows]
+
+
+def get_goal_for_tui(db_path: PathLike, goal_id: str) -> GoalDetailRecord:
+    normalized_goal_id = goal_id.strip()
+    if not normalized_goal_id:
+        raise ValueError("goal id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                goals.id,
+                goals.group_id,
+                goals.title,
+                goals.status,
+                goals.root_task_id,
+                goals.started_at,
+                goals.completed_at,
+                goals.created_at,
+                goals.updated_at,
+                COUNT(DISTINCT tasks.id) AS task_count,
+                COUNT(DISTINCT runs.id) AS run_count
+            FROM goals
+            LEFT JOIN tasks ON tasks.goal_id = goals.id
+            LEFT JOIN runs ON runs.task_id = tasks.id
+            WHERE goals.id = ?
+            GROUP BY goals.id
+            """,
+            (normalized_goal_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        raise ValueError("goal not found")
+
+    return GoalDetailRecord(**dict(row))
+
+
+def list_tasks_for_group(db_path: PathLike, group_id: str) -> list[TaskListItemRecord]:
+    normalized_group_id = group_id.strip()
+    if not normalized_group_id:
+        raise ValueError("group id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                tasks.id,
+                tasks.goal_id,
+                tasks.assigned_agent_id,
+                tasks.title,
+                tasks.status,
+                tasks.depth,
+                tasks.priority,
+                tasks.created_at,
+                agents.name AS assigned_agent_name,
+                goals.title AS goal_title
+            FROM tasks
+            JOIN agents ON agents.id = tasks.assigned_agent_id
+            JOIN goals ON goals.id = tasks.goal_id
+            WHERE goals.group_id = ?
+            ORDER BY tasks.depth ASC, tasks.priority ASC, tasks.created_at ASC, tasks.id ASC
+            """,
+            (normalized_group_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    return [TaskListItemRecord(**dict(row)) for row in rows]
+
+
+def get_task_for_tui(db_path: PathLike, task_id: str) -> TaskDetailRecord:
+    normalized_task_id = task_id.strip()
+    if not normalized_task_id:
+        raise ValueError("task id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                tasks.id,
+                tasks.goal_id,
+                tasks.parent_task_id,
+                tasks.assigned_agent_id,
+                agents.name AS assigned_agent_name,
+                goals.title AS goal_title,
+                tasks.title,
+                tasks.input_text,
+                tasks.result_text,
+                tasks.status,
+                tasks.priority,
+                tasks.depth,
+                tasks.created_at,
+                tasks.started_at,
+                tasks.completed_at,
+                tasks.updated_at
+            FROM tasks
+            JOIN agents ON agents.id = tasks.assigned_agent_id
+            JOIN goals ON goals.id = tasks.goal_id
+            WHERE tasks.id = ?
+            """,
+            (normalized_task_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        raise ValueError("task not found")
+
+    return TaskDetailRecord(**dict(row))
+
+
+def list_runs_for_group(db_path: PathLike, group_id: str) -> list[RunListItemRecord]:
+    normalized_group_id = group_id.strip()
+    if not normalized_group_id:
+        raise ValueError("group id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                runs.id,
+                runs.task_id,
+                runs.agent_id,
+                runs.attempt_number,
+                runs.status,
+                runs.created_at,
+                tasks.title AS task_title,
+                agents.name AS agent_name
+            FROM runs
+            JOIN tasks ON tasks.id = runs.task_id
+            JOIN goals ON goals.id = tasks.goal_id
+            JOIN agents ON agents.id = runs.agent_id
+            WHERE goals.group_id = ?
+            ORDER BY runs.created_at ASC, runs.id ASC
+            """,
+            (normalized_group_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    return [RunListItemRecord(**dict(row)) for row in rows]
+
+
+def get_run_for_tui(db_path: PathLike, run_id: str) -> RunDetailRecord:
+    normalized_run_id = run_id.strip()
+    if not normalized_run_id:
+        raise ValueError("run id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                runs.id,
+                runs.task_id,
+                runs.agent_id,
+                runs.attempt_number,
+                runs.status,
+                runs.session_id,
+                runs.pid,
+                runs.exit_code,
+                runs.error_text,
+                runs.log_path,
+                runs.usage_json,
+                runs.started_at,
+                runs.finished_at,
+                runs.created_at,
+                tasks.title AS task_title,
+                agents.name AS agent_name,
+                goals.title AS goal_title
+            FROM runs
+            JOIN tasks ON tasks.id = runs.task_id
+            JOIN goals ON goals.id = tasks.goal_id
+            JOIN agents ON agents.id = runs.agent_id
+            WHERE runs.id = ?
+            """,
+            (normalized_run_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        raise ValueError("run not found")
+
+    return RunDetailRecord(**dict(row))
+
+
+def get_recent_events_for_group(
+    db_path: PathLike,
+    group_id: str,
+    *,
+    limit: int = 10,
+) -> list[EventRecord]:
+    normalized_group_id = group_id.strip()
+    if not normalized_group_id:
+        raise ValueError("group id is required")
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                events.id,
+                events.goal_id,
+                events.task_id,
+                events.run_id,
+                events.agent_id,
+                events.event_type,
+                events.payload_json,
+                events.created_at
+            FROM events
+            JOIN goals ON goals.id = events.goal_id
+            WHERE goals.group_id = ?
+            ORDER BY events.created_at DESC, events.rowid DESC
+            LIMIT ?
+            """,
+            (normalized_group_id, limit),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    return [EventRecord(**dict(row)) for row in rows]
 
 
 def create_agent(

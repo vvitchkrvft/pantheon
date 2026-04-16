@@ -9,7 +9,7 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from textual.widgets import Footer, Header
 
-from pantheon.db import PathLike, bootstrap_database
+from pantheon.db import PathLike, bootstrap_database, resolve_current_group_id
 from pantheon.tui.screens.agents import AgentsScreen
 from pantheon.tui.screens.goals import GoalsScreen
 from pantheon.tui.screens.overview import OverviewScreen
@@ -56,6 +56,7 @@ class PantheonApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.current_group_id = resolve_current_group_id(self.db_path)
         self.install_screen(OverviewScreen(), name="overview")
         self.install_screen(AgentsScreen(), name="agents")
         self.install_screen(GoalsScreen(), name="goals")

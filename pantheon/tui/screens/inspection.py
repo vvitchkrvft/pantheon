@@ -20,6 +20,7 @@ from pantheon.db import (
     get_events_for_run,
     get_events_for_task,
     get_goal_for_tui,
+    get_latest_run_id_for_task,
     get_run_for_inspection,
     get_task_for_tui,
 )
@@ -145,6 +146,7 @@ class TaskInspectionScreen(InspectionScreen):
         *InspectionScreen.BINDINGS,
         Binding("e", "open_event_history", "Events", show=False),
         Binding("p", "open_parent_task", "Parent Task", show=False),
+        Binding("r", "open_latest_run", "Latest Run", show=False),
     ]
     inspection_title = "Task Inspect"
 
@@ -154,6 +156,7 @@ class TaskInspectionScreen(InspectionScreen):
 
     def render_body(self) -> str:
         task = self._get_task()
+        latest_run_id = self._get_latest_run_id()
         parent_task_id = task.parent_task_id or "None"
         result_text = task.result_text or "None"
         started_at = task.started_at or "None"
@@ -162,6 +165,11 @@ class TaskInspectionScreen(InspectionScreen):
             f"p -> inspect parent task ({task.parent_task_id})"
             if task.parent_task_id is not None
             else "p -> parent task unavailable"
+        )
+        latest_run_link = (
+            f"r -> inspect latest run ({latest_run_id})"
+            if latest_run_id is not None
+            else "r -> latest run unavailable"
         )
         return "\n".join(
             [
@@ -183,14 +191,23 @@ class TaskInspectionScreen(InspectionScreen):
                 f"completed_at: {completed_at}",
                 f"updated_at: {task.updated_at}",
                 f"link_parent_task: {parent_task_link}",
+                f"link_latest_run: {latest_run_link}",
             ]
         )
 
     def render_hint(self) -> str:
         task = self._get_task()
-        if task.parent_task_id is None:
-            return "e inspect event history    p parent task unavailable    Escape or Backspace returns to the previous screen."
-        return "e inspect event history    p inspect parent task    Escape or Backspace returns to the previous screen."
+        latest_run_hint = (
+            "r inspect latest run"
+            if self._get_latest_run_id() is not None
+            else "r latest run unavailable"
+        )
+        parent_hint = (
+            "p inspect parent task"
+            if task.parent_task_id is not None
+            else "p parent task unavailable"
+        )
+        return f"e inspect event history    {parent_hint}    {latest_run_hint}    Escape or Backspace returns to the previous screen."
 
     def action_open_parent_task(self) -> None:
         task = self._get_task()
@@ -201,8 +218,17 @@ class TaskInspectionScreen(InspectionScreen):
     def action_open_event_history(self) -> None:
         self.app.push_screen(TaskEventHistoryScreen(self.task_id))
 
+    def action_open_latest_run(self) -> None:
+        latest_run_id = self._get_latest_run_id()
+        if latest_run_id is None:
+            return
+        self.app.push_screen(RunInspectionScreen(latest_run_id))
+
     def _get_task(self) -> TaskDetailRecord:
         return get_task_for_tui(self.pantheon_app.db_path, self.task_id)
+
+    def _get_latest_run_id(self) -> str | None:
+        return get_latest_run_id_for_task(self.pantheon_app.db_path, self.task_id)
 
 
 class RunInspectionScreen(InspectionScreen):

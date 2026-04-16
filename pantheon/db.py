@@ -1432,6 +1432,43 @@ def get_events_for_run(db_path: PathLike, run_id: str) -> list[EventRecord]:
     return [EventRecord(**dict(row)) for row in rows]
 
 
+def get_latest_run_id_for_task(db_path: PathLike, task_id: str) -> str | None:
+    normalized_task_id = task_id.strip()
+    if not normalized_task_id:
+        raise ValueError("task id is required")
+
+    connection = connect_readonly_database(db_path)
+    try:
+        task_exists = connection.execute(
+            """
+            SELECT 1
+            FROM tasks
+            WHERE id = ?
+            """,
+            (normalized_task_id,),
+        ).fetchone()
+        if task_exists is None:
+            raise ValueError("task not found")
+        row = connection.execute(
+            """
+            SELECT id
+            FROM runs
+            WHERE task_id = ?
+            ORDER BY attempt_number DESC, created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (normalized_task_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("database is not initialized") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+    return str(row["id"])
+
+
 def get_task_for_inspection(db_path: PathLike, task_id: str) -> TaskInspectionRecord:
     normalized_task_id = task_id.strip()
     if not normalized_task_id:

@@ -396,6 +396,70 @@ def _seed_readonly_tui_data(db_path: Path) -> dict[str, str]:
     }
 
 
+def _insert_run_record(
+    db_path: Path,
+    *,
+    run_id: str,
+    task_id: str,
+    agent_id: str,
+    attempt_number: int,
+    status: str,
+    log_name: str,
+    log_content: str,
+    created_at: str,
+    started_at: str | None,
+    finished_at: str | None,
+    session_id: str | None = None,
+    exit_code: int | None = None,
+    error_text: str | None = None,
+) -> None:
+    logs_dir = db_path.parent / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO runs (
+                id,
+                task_id,
+                agent_id,
+                attempt_number,
+                status,
+                session_id,
+                pid,
+                exit_code,
+                error_text,
+                log_path,
+                usage_json,
+                started_at,
+                finished_at,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                task_id,
+                agent_id,
+                attempt_number,
+                status,
+                session_id,
+                None,
+                exit_code,
+                error_text,
+                _write_run_log(logs_dir, log_name, log_content),
+                None,
+                started_at,
+                finished_at,
+                created_at,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _seed_secondary_group_data(db_path: Path) -> dict[str, str]:
     bootstrap_database(db_path)
     group = create_group(db_path, "beta")
@@ -1300,6 +1364,73 @@ def test_task_inspection_opens_task_event_history(tmp_path: Path) -> None:
     asyncio.run(run_test())
 
 
+def test_task_inspection_hops_to_latest_run(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("4", "down", "down", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            hint = app.screen.query_one("#inspection-hint", Static)
+            assert "r inspect latest run" in str(hint.content)
+
+            await pilot.press("r")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RunInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"id: {ids['run_three_id']}" in str(body.content)
+            assert f"task_id: {ids['task_child_id']}" in str(body.content)
+
+    asyncio.run(run_test())
+
+
+def test_task_inspection_latest_run_prefers_highest_attempt_for_task(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+    _insert_run_record(
+        db_path,
+        run_id="run-4",
+        task_id=ids["task_child_id"],
+        agent_id=ids["worker_id"],
+        attempt_number=2,
+        status="failed",
+        log_name="run-4.log",
+        log_content="run-4 retry line 1\n",
+        created_at="2026-04-15T00:00:08Z",
+        started_at="2026-04-15T00:00:08Z",
+        finished_at="2026-04-15T00:00:09Z",
+        session_id="sess-4",
+        exit_code=1,
+        error_text="retry failed",
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("4", "down", "down", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert "link_latest_run: r -> inspect latest run (run-4)" in str(body.content)
+
+            await pilot.press("r")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RunInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            content = str(body.content)
+            assert "id: run-4" in content
+            assert "attempt_number: 2" in content
+
+    asyncio.run(run_test())
+
+
 def test_run_inspection_hops_to_task(tmp_path: Path) -> None:
     db_path = tmp_path / "pantheon.db"
     ids = _seed_readonly_tui_data(db_path)
@@ -1401,6 +1532,36 @@ def test_task_event_history_empty_state_is_explicit(tmp_path: Path) -> None:
     asyncio.run(run_test())
 
 
+def test_task_inspection_no_run_state_is_explicit_and_safe(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("]")
+            await pilot.pause()
+
+            await pilot.press("4", "enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            hint = app.screen.query_one("#inspection-hint", Static)
+            assert f"id: {beta['task_id']}" in str(body.content)
+            assert "link_latest_run: r -> latest run unavailable" in str(body.content)
+            assert "r latest run unavailable" in str(hint.content)
+
+            await pilot.press("r")
+            await pilot.pause()
+
+            assert isinstance(app.screen, TaskInspectionScreen)
+            assert f"id: {beta['task_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+
+    asyncio.run(run_test())
+
+
 def test_event_history_preserves_current_group_context(tmp_path: Path) -> None:
     db_path = tmp_path / "pantheon.db"
     _seed_readonly_tui_data(db_path)
@@ -1451,6 +1612,46 @@ def test_task_event_history_preserves_current_group_context(tmp_path: Path) -> N
     asyncio.run(run_test())
 
 
+def test_task_latest_run_hop_preserves_current_group_context(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+    _insert_run_record(
+        db_path,
+        run_id="run-beta-1",
+        task_id=beta["task_id"],
+        agent_id=beta["lead_id"],
+        attempt_number=1,
+        status="complete",
+        log_name="run-beta-1.log",
+        log_content="beta run line 1\n",
+        created_at="2026-04-15T00:00:12Z",
+        started_at="2026-04-15T00:00:12Z",
+        finished_at="2026-04-15T00:00:13Z",
+        session_id="sess-beta-1",
+        exit_code=0,
+    )
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            context = app.query_one("#current-group-context", Static)
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.current_group_id == beta["group_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+            await pilot.press("4", "enter", "r")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RunInspectionScreen)
+            assert "Current Group: beta (2/2)" in str(context.content)
+            assert "id: run-beta-1" in str(app.screen.query_one("#inspection-body", Static).content)
+
+    asyncio.run(run_test())
+
+
 def test_event_history_return_navigation_is_deterministic(tmp_path: Path) -> None:
     db_path = tmp_path / "pantheon.db"
     ids = _seed_readonly_tui_data(db_path)
@@ -1489,6 +1690,32 @@ def test_task_event_history_return_navigation_is_deterministic(tmp_path: Path) -
 
             assert isinstance(app.screen, TaskEventHistoryScreen)
             assert f"task_id: {ids['task_child_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, TaskInspectionScreen)
+            assert f"id: {ids['task_child_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
+
+            await pilot.press("backspace")
+            await pilot.pause()
+            assert isinstance(app.screen, TasksScreen)
+            assert app.screen.selected_task_id == ids["task_child_id"]
+
+    asyncio.run(run_test())
+
+
+def test_task_latest_run_hop_return_navigation_is_deterministic(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("4", "down", "down", "enter", "r")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RunInspectionScreen)
+            assert f"id: {ids['run_three_id']}" in str(app.screen.query_one("#inspection-body", Static).content)
 
             await pilot.press("escape")
             await pilot.pause()

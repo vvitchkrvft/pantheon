@@ -17,6 +17,7 @@ from pantheon.db import (
     create_group,
     get_events_for_goal,
     get_events_for_task,
+    get_latest_run_id_for_task,
     get_goal_status,
     retry_task,
     submit_goal,
@@ -1041,6 +1042,88 @@ def test_get_events_for_task_returns_task_scoped_events_only(tmp_path: Path) -> 
 
     assert [event.event_type for event in events] == ["task.started"]
     assert events[0].task_id == submission.root_task.id
+
+
+def test_get_latest_run_id_for_task_prefers_highest_attempt_then_created_at(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+
+    group = create_group(db_path, "research")
+    lead = create_agent(
+        db_path,
+        group_name_or_id=group.id,
+        name="lead-1",
+        role="lead",
+        hermes_home="/tmp/hermes-home",
+        workdir="/tmp/workdir",
+    )
+    submission = submit_goal(
+        db_path,
+        group_name_or_id=group.id,
+        goal_text="Ship the first Pantheon slice",
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executemany(
+            """
+            INSERT INTO runs (
+                id,
+                task_id,
+                agent_id,
+                attempt_number,
+                status,
+                session_id,
+                pid,
+                exit_code,
+                error_text,
+                log_path,
+                usage_json,
+                started_at,
+                finished_at,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "run-1",
+                    submission.root_task.id,
+                    lead.id,
+                    1,
+                    "failed",
+                    None,
+                    None,
+                    1,
+                    "failed once",
+                    str(tmp_path / "logs" / "run-1.log"),
+                    None,
+                    "2026-04-15T00:00:01Z",
+                    "2026-04-15T00:00:02Z",
+                    "2026-04-15T00:00:01Z",
+                ),
+                (
+                    "run-2",
+                    submission.root_task.id,
+                    lead.id,
+                    2,
+                    "running",
+                    None,
+                    None,
+                    None,
+                    None,
+                    str(tmp_path / "logs" / "run-2.log"),
+                    None,
+                    "2026-04-15T00:00:03Z",
+                    None,
+                    "2026-04-15T00:00:03Z",
+                ),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert get_latest_run_id_for_task(db_path, submission.root_task.id) == "run-2"
 
 
 def test_start_goal_execution_persists_terminal_failure_when_hermes_launch_fails(

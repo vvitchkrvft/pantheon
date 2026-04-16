@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widgets import ListItem, ListView, Static
 
 from pantheon.db import RunDetailRecord, RunListItemRecord, get_run_for_tui, list_runs_for_group
 from pantheon.tui.screens import PantheonScreen, panel_widget
+from pantheon.tui.screens.inspection import RunInspectionScreen
 
 
 class RunsScreen(PantheonScreen):
     """Run inspection screen."""
 
+    BINDINGS = [Binding("enter", "drill_in", "Inspect", show=False)]
     screen_title = "Runs"
     selected_run_id: reactive[str | None] = reactive(None)
 
@@ -79,6 +82,16 @@ class RunsScreen(PantheonScreen):
         if event.list_view.id != "runs-list":
             return
         self._sync_selection_from_index(event.list_view.index)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view.id != "runs-list":
+            return
+        self.action_drill_in()
+
+    def action_drill_in(self) -> None:
+        if self.selected_run_id is None:
+            return
+        self.app.push_screen(RunInspectionScreen(self.selected_run_id))
 
     def watch_selected_run_id(self, old_value: str | None, new_value: str | None) -> None:
         detail = self.query_one("#runs-detail", Static)

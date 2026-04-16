@@ -9,6 +9,7 @@ from pantheon.tui import PantheonApp
 from pantheon.tui.screens.agents import AgentsScreen
 from pantheon.tui.screens.group_selector import GroupSelectorScreen
 from pantheon.tui.screens.goals import GoalsScreen
+from pantheon.tui.screens.inspection import GoalInspectionScreen, RunInspectionScreen, TaskInspectionScreen
 from pantheon.tui.screens.runs import RunsScreen
 from pantheon.tui.screens.tasks import TasksScreen
 
@@ -775,5 +776,118 @@ def test_group_switch_empty_state_is_explicit_for_chosen_group(tmp_path: Path) -
             await pilot.pause()
             assert app.screen.selected_task_id is None
             assert "No tasks found in the current group." in str(detail.content)
+
+    asyncio.run(run_test())
+
+
+def test_goal_drill_in_opens_focused_inspection_and_returns_to_goals(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("3")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalsScreen)
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert "entity_type: goal" in str(body.content)
+            assert f"id: {ids['goal_one_id']}" in str(body.content)
+            assert "title: Ship slice A" in str(body.content)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalsScreen)
+            assert app.screen.selected_goal_id == ids["goal_one_id"]
+
+    asyncio.run(run_test())
+
+
+def test_task_drill_in_opens_focused_inspection_and_returns_to_tasks(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("4")
+            await pilot.pause()
+            assert isinstance(app.screen, TasksScreen)
+
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, TaskInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert "entity_type: task" in str(body.content)
+            assert f"id: {ids['task_two_id']}" in str(body.content)
+            assert "title: Ship slice B" in str(body.content)
+
+            await pilot.press("backspace")
+            await pilot.pause()
+            assert isinstance(app.screen, TasksScreen)
+            assert app.screen.selected_task_id == ids["task_two_id"]
+
+    asyncio.run(run_test())
+
+
+def test_run_drill_in_opens_focused_inspection_and_returns_to_runs(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    ids = _seed_readonly_tui_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            await pilot.press("5")
+            await pilot.pause()
+            assert isinstance(app.screen, RunsScreen)
+
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, RunInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert "entity_type: run" in str(body.content)
+            assert f"id: {ids['run_two_id']}" in str(body.content)
+            assert "task: Ship slice B" in str(body.content)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, RunsScreen)
+            assert app.screen.selected_run_id == ids["run_two_id"]
+
+    asyncio.run(run_test())
+
+
+def test_drill_in_preserves_current_group_context_on_return(tmp_path: Path) -> None:
+    db_path = tmp_path / "pantheon.db"
+    _seed_readonly_tui_data(db_path)
+    beta = _seed_secondary_group_data(db_path)
+
+    async def run_test() -> None:
+        app = PantheonApp(db_path)
+        async with app.run_test() as pilot:
+            context = app.query_one("#current-group-context", Static)
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.current_group_id == beta["group_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+            await pilot.press("3", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalInspectionScreen)
+            body = app.screen.query_one("#inspection-body", Static)
+            assert f"group_id: {beta['group_id']}" in str(body.content)
+            assert "Current Group: beta (2/2)" in str(context.content)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, GoalsScreen)
+            assert app.current_group_id == beta["group_id"]
+            assert app.screen.selected_goal_id == beta["goal_id"]
+            assert "Current Group: beta (2/2)" in str(context.content)
 
     asyncio.run(run_test())

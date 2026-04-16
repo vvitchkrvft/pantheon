@@ -78,3 +78,18 @@ Footer {
     height: 1fr;
     padding: 1;
 }
+
+.inspection-layout {
+    height: 1fr;
+    padding: 1;
+}
+
+#inspection-body {
+    height: 1fr;
+}
+
+#inspection-hint {
+    height: auto;
+    padding: 0 2 1 2;
+    color: $text-muted;
+}

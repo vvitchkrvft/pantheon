@@ -83,7 +83,7 @@ class PantheonApp(App[None]):
             return
         self.switch_screen(screen_name)
         self.current_screen_name = screen_name
-        self._update_shell_context()
+        self.refresh_shell_context()
 
     def action_previous_group(self) -> None:
         self._cycle_group(-1)
@@ -103,9 +103,13 @@ class PantheonApp(App[None]):
     def watch_current_group_id(self, old_value: str | None, new_value: str | None) -> None:
         if old_value == new_value:
             return
-        self._update_shell_context()
+        self.refresh_shell_context()
         for screen in self._screens.values():
             screen.handle_group_changed()
+        active_screen = self.screen
+        handle_group_changed = getattr(active_screen, "handle_group_changed", None)
+        if active_screen not in self._screens.values() and callable(handle_group_changed):
+            handle_group_changed()
 
     def _reload_groups(self) -> None:
         self._groups = list_groups(self.db_path)
@@ -139,10 +143,13 @@ class PantheonApp(App[None]):
             return
         self.select_group(selected_group_id)
 
-    def _update_shell_context(self) -> None:
-        screen_title = dict(SCREEN_ORDER).get(self.current_screen_name, "Overview")
+    def refresh_shell_context(self, screen_title: str | None = None) -> None:
+        self._update_shell_context(screen_title=screen_title)
+
+    def _update_shell_context(self, screen_title: str | None = None) -> None:
+        screen_title = screen_title or dict(SCREEN_ORDER).get(self.current_screen_name, "Overview")
         group_label = self._current_group_label()
-        self.sub_title = f"{screen_title} | {group_label}"
+        self.sub_title = screen_title
         if self.is_mounted:
             self.query_one("#current-group-context", Static).update(
                 f"Current Group: {group_label}    g open selector    [ / ] cycle groups"

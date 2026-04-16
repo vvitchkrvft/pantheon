@@ -35,7 +35,7 @@ class PantheonScreen(Screen[None]):
     screen_title = "Pantheon"
 
     def on_screen_resume(self) -> None:
-        self.app.sub_title = self.screen_title
+        self.pantheon_app.refresh_shell_context(self.screen_title)
         self.focus_default()
         self.refresh_screen_data()
 

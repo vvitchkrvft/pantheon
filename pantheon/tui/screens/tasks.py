@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widgets import ListItem, ListView, Static
 
 from pantheon.db import TaskDetailRecord, TaskListItemRecord, get_task_for_tui, list_tasks_for_group
 from pantheon.tui.screens import PantheonScreen, panel_widget
+from pantheon.tui.screens.inspection import TaskInspectionScreen
 
 
 class TasksScreen(PantheonScreen):
     """Task inspection screen."""
 
+    BINDINGS = [Binding("enter", "drill_in", "Inspect", show=False)]
     screen_title = "Tasks"
     selected_task_id: reactive[str | None] = reactive(None)
 
@@ -79,6 +82,16 @@ class TasksScreen(PantheonScreen):
         if event.list_view.id != "tasks-list":
             return
         self._sync_selection_from_index(event.list_view.index)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view.id != "tasks-list":
+            return
+        self.action_drill_in()
+
+    def action_drill_in(self) -> None:
+        if self.selected_task_id is None:
+            return
+        self.app.push_screen(TaskInspectionScreen(self.selected_task_id))
 
     def watch_selected_task_id(self, old_value: str | None, new_value: str | None) -> None:
         detail = self.query_one("#tasks-detail", Static)

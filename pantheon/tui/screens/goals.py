@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widgets import ListItem, ListView, Static
 
 from pantheon.db import GoalDetailRecord, get_goal_for_tui, list_goals_for_group
 from pantheon.tui.screens import PantheonScreen, panel_widget
+from pantheon.tui.screens.inspection import GoalInspectionScreen
 
 
 class GoalsScreen(PantheonScreen):
     """Goal inspection screen."""
 
+    BINDINGS = [Binding("enter", "drill_in", "Inspect", show=False)]
     screen_title = "Goals"
     selected_goal_id: reactive[str | None] = reactive(None)
 
@@ -79,6 +82,16 @@ class GoalsScreen(PantheonScreen):
         if event.list_view.id != "goals-list":
             return
         self._sync_selection_from_index(event.list_view.index)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view.id != "goals-list":
+            return
+        self.action_drill_in()
+
+    def action_drill_in(self) -> None:
+        if self.selected_goal_id is None:
+            return
+        self.app.push_screen(GoalInspectionScreen(self.selected_goal_id))
 
     def watch_selected_goal_id(self, old_value: str | None, new_value: str | None) -> None:
         detail = self.query_one("#goals-detail", Static)
